@@ -223,16 +223,20 @@ def load_schedule_data(season):
 
 @st.cache_data(ttl=300)
 def fetch_live_player_odds(market_key="player_pass_yds"):
-  api_key = "52db5d81d6148fd9a07a8f8649ad8698"
+  api_key = "27ba55e961c145981b1a15027459cc03"
   url = f"https://api.the-odds-api.com/v4/sports/americanfootball_nfl/events"
   params = {"apiKey": api_key}
   try:
     resp = requests.get(url, params=params, timeout=5)
     if resp.status_code != 200:
+      st.warning(
+          f"Odds API Events Error (Status {resp.status_code}): Check API key"
+          " quota."
+      )
       return {}
     events = resp.json()
     market_lines = {}
-    for event in events[:10]:
+    for event in events[:5]:
       event_id = event.get("id")
       odds_url = f"https://api.the-odds-api.com/v4/sports/americanfootball_nfl/events/{event_id}/odds"
       odds_params = {
@@ -252,14 +256,15 @@ def fetch_live_player_odds(market_key="player_pass_yds"):
                 if p_name:
                   market_lines[p_name] = outcome.get("point")
     return market_lines
-  except Exception:
+  except Exception as e:
+    st.warning(f"Connection error fetching player odds: {e}")
     return {}
 
 
 @st.cache_data(ttl=300)
 def fetch_live_game_odds():
-  api_key = "52db5d81d6148fd9a07a8f8649ad8698"
-  url = "https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds/"
+  api_key = "27ba55e961c145981b1a15027459cc03"
+  url = "https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds"
   params = {
       "apiKey": api_key,
       "regions": "us",
@@ -270,8 +275,14 @@ def fetch_live_game_odds():
     resp = requests.get(url, params=params, timeout=5)
     if resp.status_code == 200:
       return resp.json()
-    return []
-  except Exception:
+    else:
+      st.warning(
+          f"Odds API Game Odds Error (Status {resp.status_code}): Check API"
+          " quota."
+      )
+      return []
+  except Exception as e:
+    st.warning(f"Connection error fetching game odds: {e}")
     return []
 
 
