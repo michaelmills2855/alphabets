@@ -17,6 +17,10 @@ st.set_page_config(
     layout="wide",
 )
 
+# Initialize Session State for Parlay Slip
+if "parlay_legs" not in st.session_state:
+  st.session_state.parlay_legs = []
+
 # Custom High-End Terminal Styling
 st.markdown(
     """
@@ -146,6 +150,20 @@ def calculate_implied_probability(american_odds: int) -> float:
   elif american_odds < 0:
     return abs(american_odds) / (abs(american_odds) + 100)
   return 0.5
+
+
+def american_to_decimal(odds):
+  if odds > 0:
+    return 1 + (odds / 100.0)
+  else:
+    return 1 + (100.0 / abs(odds))
+
+
+def decimal_to_american(decimal):
+  if decimal >= 2.0:
+    return round((decimal - 1.0) * 100)
+  else:
+    return round(-100.0 / (decimal - 1.0))
 
 
 # Main Header Section
@@ -700,8 +718,11 @@ elif tab_selection == "Game Analysis":
         roof = game_row.get("roof", "outdoors")
 
         st.markdown("---")
-        
-        st.markdown(f"<h2 style='text-align: center; margin-top: 5px;'>{away_team} at {home_team}</h2>", unsafe_allow_html=True)
+        st.markdown(
+            f"<h2 style='text-align: center; margin-top: 5px;'>{away_team} at"
+            f" {home_team}</h2>",
+            unsafe_allow_html=True,
+        )
 
         bc1, bc2, bc3 = st.columns(3)
         with bc1:
@@ -753,30 +774,50 @@ elif tab_selection == "Game Analysis":
         away_power = (h_val % 10) + 18
         home_power = ((h_val // 7) % 10) + 20
         proj_spread = round(home_power - away_power, 1)
-        
-        away_states = ["coming off a gritty divisional win", "looking to bounce back from a tough road loss", "trying to keep it rolling after a high-scoring home victory", "seeking redemption following a tight fourth-quarter collapse"]
-        home_states = ["aiming to protect home turf after a bye week", "riding momentum from a dominant defensive display", "looking to rebound from an offensive stall last week", "eager to extend their home winning streak"]
-        
+
+        away_states = [
+            "coming off a gritty divisional win",
+            "looking to bounce back from a tough road loss",
+            "trying to keep it rolling after a high-scoring home victory",
+            "seeking redemption following a tight fourth-quarter collapse",
+        ]
+        home_states = [
+            "aiming to protect home turf after a bye week",
+            "riding momentum from a dominant defensive display",
+            "looking to rebound from an offensive stall last week",
+            "eager to extend their home winning streak",
+        ]
+
         away_trend = away_states[h_val % len(away_states)]
         home_trend = home_states[(h_val // 3) % len(home_states)]
 
         matchup_angles = [
-            f"An elite trench battle where the {home_team} front-seven must contain a dynamic away rushing attack.",
-            f"A high-tempo aerial showcase featuring two aggressive playcallers testing opposing secondary depth.",
-            f"A gritty defensive slugfest where third-down conversion efficiency and red-zone stops will decide the outcome.",
-            f"A possession-heavy chess match favoring whichever team can establish early-down rushing efficiency and control the clock."
+            f"An elite trench battle where the {home_team} front-seven must"
+            " contain a dynamic away rushing attack.",
+            "A high-tempo aerial showcase featuring two aggressive playcallers"
+            " testing opposing secondary depth.",
+            "A gritty defensive slugfest where third-down conversion"
+            " efficiency and red-zone stops will decide the outcome.",
+            "A possession-heavy chess match favoring whichever team can"
+            " establish early-down rushing efficiency and control the clock.",
         ]
         chosen_angle = matchup_angles[h_val % len(matchup_angles)]
 
         narrative = (
-            f"**1. Strategic Overview & Matchup Dynamics:**\n"
-            f"- This Week {sel_week} showdown features the **{away_team}** traveling to face the **{home_team}** at {stadium}. "
-            f"The model rates the **{home_team}** as a **{abs(proj_spread)}pt favorite** in an environment characterized by *{weather_str}*.\n\n"
-            f"**2. Past Performance & Team Momentum:**\n"
-            f"- The **{away_team}** enter this matchup **{away_trend}**, leaning on standout individual efforts to maintain offensive rhythm. "
-            f"Meanwhile, the **{home_team}** are **{home_trend}**, putting extra emphasis on early execution to dictate game script from the opening whistle.\n\n"
-            f"**3. Matchup Key Factors & Tactical Battleground:**\n"
-            f"- {chosen_angle} Watch closely for how opposing coordinators scheme against key playmakers, as turnover margin and explosive play differential will heavily sway win probability."
+            f"**1. Strategic Overview & Matchup Dynamics:**\n- This Week"
+            f" {sel_week} showdown features the **{away_team}** traveling to"
+            f" face the **{home_team}** at {stadium}. The model rates the"
+            f" **{home_team}** as a **{abs(proj_spread)}pt favorite** in an"
+            f" environment characterized by *{weather_str}*.\n\n**2. Past"
+            f" Performance & Team Momentum:**\n- The **{away_team}** enter this"
+            f" matchup **{away_trend}**, leaning on standout individual efforts"
+            f" to maintain offensive rhythm. Meanwhile, the **{home_team}** are"
+            f" **{home_trend}**, putting extra emphasis on early execution to"
+            f" dictate game script from the opening whistle.\n\n**3. Matchup Key"
+            f" Factors & Tactical Battleground:**\n- {chosen_angle} Watch"
+            " closely for how opposing coordinators scheme against key"
+            " playmakers, as turnover margin and explosive play differential"
+            " will heavily sway win probability."
         )
         st.success(narrative)
 
@@ -863,19 +904,52 @@ elif tab_selection == "Game Analysis":
             props_df = pd.DataFrame(prop_table_rows)
 
             h_cols = st.columns([2.2, 1, 1, 1, 1, 1, 1, 1.2])
-            h_cols[0].markdown("<span style='color: #9ca3af; font-weight: 700; font-size: 0.85rem;'>PLAYER</span>", unsafe_allow_html=True)
-            h_cols[1].markdown("<span style='color: #9ca3af; font-weight: 700; font-size: 0.85rem;'>PROP</span>", unsafe_allow_html=True)
-            h_cols[2].markdown("<span style='color: #9ca3af; font-weight: 700; font-size: 0.85rem;'>LINE</span>", unsafe_allow_html=True)
-            h_cols[3].markdown("<span style='color: #9ca3af; font-weight: 700; font-size: 0.85rem;'>PROJ</span>", unsafe_allow_html=True)
-            h_cols[4].markdown("<span style='color: #9ca3af; font-weight: 700; font-size: 0.85rem;'>SIDE</span>", unsafe_allow_html=True)
-            h_cols[5].markdown("<span style='color: #9ca3af; font-weight: 700; font-size: 0.85rem;'>WIN PROB</span>", unsafe_allow_html=True)
-            h_cols[6].markdown("<span style='color: #9ca3af; font-weight: 700; font-size: 0.85rem;'>ACTION</span>", unsafe_allow_html=True)
+            h_cols[0].markdown(
+                "<span style='color: #9ca3af; font-weight: 700; font-size:"
+                " 0.85rem;'>PLAYER</span>",
+                unsafe_allow_html=True,
+            )
+            h_cols[1].markdown(
+                "<span style='color: #9ca3af; font-weight: 700; font-size:"
+                " 0.85rem;'>PROP</span>",
+                unsafe_allow_html=True,
+            )
+            h_cols[2].markdown(
+                "<span style='color: #9ca3af; font-weight: 700; font-size:"
+                " 0.85rem;'>LINE</span>",
+                unsafe_allow_html=True,
+            )
+            h_cols[3].markdown(
+                "<span style='color: #9ca3af; font-weight: 700; font-size:"
+                " 0.85rem;'>PROJ</span>",
+                unsafe_allow_html=True,
+            )
+            h_cols[4].markdown(
+                "<span style='color: #9ca3af; font-weight: 700; font-size:"
+                " 0.85rem;'>SIDE</span>",
+                unsafe_allow_html=True,
+            )
+            h_cols[5].markdown(
+                "<span style='color: #9ca3af; font-weight: 700; font-size:"
+                " 0.85rem;'>WIN PROB</span>",
+                unsafe_allow_html=True,
+            )
+            h_cols[6].markdown(
+                "<span style='color: #9ca3af; font-weight: 700; font-size:"
+                " 0.85rem;'>ACTION</span>",
+                unsafe_allow_html=True,
+            )
             h_cols[7].markdown("", unsafe_allow_html=True)
-            st.markdown("<hr style='margin: 4px 0px; border-color: #1f2937;'>", unsafe_allow_html=True)
+            st.markdown(
+                "<hr style='margin: 4px 0px; border-color: #1f2937;'>",
+                unsafe_allow_html=True,
+            )
 
             for idx, r in props_df.iterrows():
               cols = st.columns([2.2, 1, 1, 1, 1, 1, 1, 1.2])
-              cols[0].write(f"**{r['Player']}** ({r['Team']} - {r['Position']})")
+              cols[0].write(
+                  f"**{r['Player']}** ({r['Team']} - {r['Position']})"
+              )
               cols[1].write(r["Prop"])
               cols[2].write(f"{r['Sportsbook Line']}")
               cols[3].write(f"{r['Model Projection']}")
@@ -885,7 +959,8 @@ elif tab_selection == "Game Analysis":
                   else "#9ca3af"
               )
               cols[4].markdown(
-                  f"<span style='color: {rec_color}; font-weight: 700;'>{r['Recommendation']}</span>",
+                  f"<span style='color: {rec_color}; font-weight:"
+                  f" 700;'>{r['Recommendation']}</span>",
                   unsafe_allow_html=True,
               )
               cols[5].write(r["Win Prob %"])
@@ -893,10 +968,15 @@ elif tab_selection == "Game Analysis":
               if r["Recommendation"] in ["OVER", "UNDER"]:
                 csv_bytes = generate_row_csv(
                     bet_type=f"Game Analysis Prop ({r['Position']})",
-                    selection=f"{r['Player']} {r['Recommendation']} {r['Sportsbook Line']} {r['Prop']}",
+                    selection=(
+                        f"{r['Player']} {r['Recommendation']}"
+                        f" {r['Sportsbook Line']} {r['Prop']}"
+                    ),
                     odds=-110,
                     units=1.0,
-                    model_prob=float(r["Win Prob %"].replace("%", "")) / 100.0,
+                    model_prob=(
+                        float(r["Win Prob %"].replace("%", "")) / 100.0
+                    ),
                 )
                 cols[6].download_button(
                     label="📥 Log",
@@ -927,8 +1007,8 @@ elif tab_selection == "Bet Calculator":
   st.subheader("⚡ Multi-Model Quantitative Pricing & Edge Finder")
   st.markdown(
       "<p style='color: #9ca3af;'>Test player props for the upcoming matchup,"
-      " compare against market consensus via The Odds API, and evaluate"
-      " edge.</p>",
+      " compare against market consensus via The Odds API, evaluate edge, and"
+      " build your parlay slip.</p>",
       unsafe_allow_html=True,
   )
 
@@ -984,7 +1064,9 @@ elif tab_selection == "Bet Calculator":
               last_played_week + 1 if last_played_week < 18 else 18
           )
           player_team = (
-              player_data["team"].iloc[-1] if "team" in player_data.columns else "UNK"
+              player_data["team"].iloc[-1]
+              if "team" in player_data.columns
+              else "UNK"
           )
 
           opponent = "BYE / Unknown"
@@ -1047,11 +1129,12 @@ elif tab_selection == "Bet Calculator":
           with b_col2:
             bet_side = st.selectbox("Bet Direction", ["OVER", "UNDER"])
           with b_col3:
-            american_odds = st.number_input("American Odds (e.g., -110)", value=-110, step=5)
+            american_odds = st.number_input(
+                "American Odds (e.g., -110)", value=-110, step=5
+            )
 
           implied_prob = calculate_implied_probability(int(american_odds))
 
-          # Dynamic Normal CDF Calculation for Over / Under
           std_dev_lookup = {
               "passing_yards": 24.0,
               "rushing_yards": 9.5,
@@ -1060,16 +1143,16 @@ elif tab_selection == "Bet Calculator":
               "fantasy_points_ppr": 4.5,
           }
           chosen_std = std_dev_lookup.get(stat_metric, 7.5)
-          over_prob = calculate_normal_cdf_probability(market_line, model_projection, chosen_std)
+          over_prob = calculate_normal_cdf_probability(
+              market_line, model_projection, chosen_std
+          )
           under_prob = 1.0 - over_prob
 
-          # Set win probability according to the user's selected bet direction
           if bet_side == "OVER":
             model_win_prob = over_prob
           else:
             model_win_prob = under_prob
 
-          # Determine explicit recommendation
           if over_prob >= 0.53:
             rec_text = "🎯 TAKE THE OVER"
             rec_color = "#10b981"
@@ -1081,8 +1164,7 @@ elif tab_selection == "Bet Calculator":
             rec_color = "#9ca3af"
 
           st.markdown("---")
-          
-          # Display Recommendation Banner
+
           st.markdown(
               f"""
               <div style="background: #111620; border: 1px solid #1f2937; padding: 16px; border-radius: 12px; margin-bottom: 20px; text-align: center;">
@@ -1096,7 +1178,8 @@ elif tab_selection == "Bet Calculator":
           col_res1, col_res2, col_res3 = st.columns(3)
           with col_res1:
             st.metric(
-                f"Selected Side ({bet_side}) Win Prob", f"{round(model_win_prob * 100, 1)}%"
+                f"Selected Side ({bet_side}) Win Prob",
+                f"{round(model_win_prob * 100, 1)}%",
             )
           with col_res2:
             st.metric(
@@ -1104,18 +1187,75 @@ elif tab_selection == "Bet Calculator":
             )
           with col_res3:
             st.markdown("<br>", unsafe_allow_html=True)
-            csv_bytes = generate_row_csv(
-                bet_type="Calculator Prop",
-                selection=f"{sel_player} {bet_side} {market_line} {STAT_NAME_MAP.get(stat_metric, stat_metric)}",
-                odds=int(american_odds),
-                units=1.0,
-                model_prob=model_win_prob,
+            if st.button("➕ Add to Parlay Slip", use_container_width=True):
+              leg_item = {
+                  "player": sel_player,
+                  "team": player_team,
+                  "prop": STAT_NAME_MAP.get(stat_metric, stat_metric),
+                  "side": bet_side,
+                  "line": market_line,
+                  "odds": int(american_odds),
+                  "win_prob": model_win_prob,
+              }
+              st.session_state.parlay_legs.append(leg_item)
+              st.success(
+                  f"Added {sel_player} ({bet_side} {market_line}"
+                  f" {STAT_NAME_MAP.get(stat_metric, stat_metric)}) to your"
+                  " Parlay Slip!"
+              )
+
+          # Parlay Slip Manager Section
+          st.markdown("---")
+          st.markdown("### 🎟️ Active Parlay Slip & Combined Probability")
+          if st.session_state.parlay_legs:
+            parlay_df = pd.DataFrame(st.session_state.parlay_legs)
+            st.dataframe(
+                parlay_df[
+                    ["player", "team", "prop", "side", "line", "odds", "win_prob"]
+                ].rename(columns={
+                    "player": "Player",
+                    "team": "Team",
+                    "prop": "Prop",
+                    "side": "Side",
+                    "line": "Line",
+                    "odds": "Odds",
+                    "win_prob": "Win Prob",
+                }),
+                use_container_width=True,
+                hide_index=True,
             )
-            st.download_button(
-                label="📥 Log Bet to CSV",
-                data=csv_bytes,
-                file_name=f"bet_{sel_player.replace(' ', '_')}.csv",
-                mime="text/csv",
+
+            # Calculate combined parlay win percentage and parlay odds
+            combined_prob = 1.0
+            combined_decimal = 1.0
+            for leg in st.session_state.parlay_legs:
+              combined_prob *= leg["win_prob"]
+              combined_decimal *= american_to_decimal(leg["odds"])
+
+            combined_american = decimal_to_american(combined_decimal)
+
+            p_col1, p_col2, p_col3 = st.columns(3)
+            with p_col1:
+              st.metric(
+                  "Combined Parlay Win Probability",
+                  f"{round(combined_prob * 100, 2)}%",
+              )
+            with p_col2:
+              st.metric(
+                  "Combined Parlay Odds",
+                  f"{combined_american:+d}"
+                  if combined_american != 0
+                  else "EVEN",
+              )
+            with p_col3:
+              st.markdown("<br>", unsafe_allow_html=True)
+              if st.button("🗑️ Clear Parlay Slip"):
+                st.session_state.parlay_legs = []
+                st.rerun()
+          else:
+            st.info(
+                "Your parlay slip is currently empty. Click 'Add to Parlay Slip'"
+                " above to combine props!"
             )
         else:
           st.info("Insufficient game logs for selected player/stat.")
@@ -1226,10 +1366,18 @@ elif tab_selection == "🎯 A.L.P.H.A.'s Locks":
 
           diff = model_proj - market_line
           side = "OVER" if diff >= 0 else "UNDER"
-          
-          std_dev_lookup = {"passing_yards": 24.0, "rushing_yards": 9.5, "receiving_yards": 15.0, "receptions": 2.2, "fantasy_points_ppr": 4.5}
+
+          std_dev_lookup = {
+              "passing_yards": 24.0,
+              "rushing_yards": 9.5,
+              "receiving_yards": 15.0,
+              "receptions": 2.2,
+              "fantasy_points_ppr": 4.5,
+          }
           chosen_std = std_dev_lookup.get(lock_stat, 7.5)
-          win_prob = calculate_normal_cdf_probability(market_line, model_proj, chosen_std)
+          win_prob = calculate_normal_cdf_probability(
+              market_line, model_proj, chosen_std
+          )
           if side == "UNDER":
             win_prob = 1.0 - win_prob
 
@@ -1270,14 +1418,18 @@ elif tab_selection == "🎯 A.L.P.H.A.'s Locks":
             cols[2].write(f"Line: {r['Sportsbook Line']}")
             cols[3].write(f"Proj: {r['Model Projection']}")
             cols[4].markdown(
-                f"<span style='color: #10b981; font-weight: 700;'>{r['Recommended Side']}</span>",
+                f"<span style='color: #10b981; font-weight:"
+                f" 700;'>{r['Recommended Side']}</span>",
                 unsafe_allow_html=True,
             )
             cols[5].write(f"{r['Win Probability %']}%")
 
             csv_bytes = generate_row_csv(
                 bet_type=f"ALPHA Lock ({lock_position})",
-                selection=f"{r['Player']} {r['Recommended Side']} {r['Sportsbook Line']} {r['Prop']}",
+                selection=(
+                    f"{r['Player']} {r['Recommended Side']}"
+                    f" {r['Sportsbook Line']} {r['Prop']}"
+                ),
                 odds=-110,
                 units=1.0,
                 model_prob=r["Win Probability %"] / 100.0,
@@ -1294,6 +1446,23 @@ elif tab_selection == "🎯 A.L.P.H.A.'s Locks":
                 "<hr style='margin: 4px 0px; border-color: #1f2937;'>",
                 unsafe_allow_html=True,
             )
+
+          # Full Locks Table Download Button
+          st.markdown("<br>", unsafe_allow_html=True)
+          full_locks_csv = high_conviction_df.to_csv(index=False).encode(
+              "utf-8"
+          )
+          st.download_button(
+              label=(
+                  "📥 Download Full Locks Table to CSV / Excel"
+                  f" (Week {target_lock_week})"
+              ),
+              data=full_locks_csv,
+              file_name=f"alpha_locks_week_{target_lock_week}.csv",
+              mime="text/csv",
+              key="dl_full_locks_table",
+              use_container_width=True,
+          )
         else:
           st.warning(
               f"No qualifying player lines found for {lock_position} in Week"
@@ -1317,8 +1486,10 @@ elif tab_selection == "🏈 Weekly Spread & O/U Matrix":
 
   try:
     sched_df = load_schedule_data(selected_season)
-    
-    with st.spinner("Syncing live game spread and total lines directly from The Odds API..."):
+
+    with st.spinner(
+        "Syncing live game spread and total lines directly from The Odds API..."
+    ):
       live_game_odds = fetch_live_game_odds()
 
     live_spread_lookup = {}
@@ -1328,7 +1499,7 @@ elif tab_selection == "🏈 Weekly Spread & O/U Matrix":
       a_team = game.get("away_team")
       h_abbr = TEAM_NAME_TO_ABBR.get(h_team, h_team)
       a_abbr = TEAM_NAME_TO_ABBR.get(a_team, a_team)
-      
+
       bookmakers = game.get("bookmakers", [])
       selected_bk = None
       for bk_key in ["draftkings", "fanduel", "betmgm", "caesars", "pinnacle"]:
@@ -1348,9 +1519,15 @@ elif tab_selection == "🏈 Weekly Spread & O/U Matrix":
               out_name = out.get("name")
               point = out.get("point")
               if point is not None:
-                if out_name == h_team or TEAM_NAME_TO_ABBR.get(out_name, out_name) == h_abbr:
+                if (
+                    out_name == h_team
+                    or TEAM_NAME_TO_ABBR.get(out_name, out_name) == h_abbr
+                ):
                   live_spread_lookup[(a_abbr, h_abbr)] = float(point)
-                elif out_name == a_team or TEAM_NAME_TO_ABBR.get(out_name, out_name) == a_abbr:
+                elif (
+                    out_name == a_team
+                    or TEAM_NAME_TO_ABBR.get(out_name, out_name) == a_abbr
+                ):
                   live_spread_lookup[(a_abbr, h_abbr)] = float(-point)
           elif mkt.get("key") == "totals":
             for out in mkt.get("outcomes", []):
@@ -1385,24 +1562,30 @@ elif tab_selection == "🏈 Weekly Spread & O/U Matrix":
             "Action",
         ]
         for col, h in zip(h_cols, headers):
-          col.markdown(f"<span style='color: #9ca3af; font-weight: 700; font-size: 0.80rem;'>{h}</span>", unsafe_allow_html=True)
-        st.markdown("<hr style='margin: 4px 0px; border-color: #1f2937;'>", unsafe_allow_html=True)
+          col.markdown(
+              f"<span style='color: #9ca3af; font-weight: 700; font-size:"
+              f" 0.80rem;'>{h}</span>",
+              unsafe_allow_html=True,
+          )
+        st.markdown(
+            "<hr style='margin: 4px 0px; border-color: #1f2937;'>",
+            unsafe_allow_html=True,
+        )
 
+        matrix_table_rows = []
         for idx, row in week_games.iterrows():
           home = str(row.get("home_team", "HOME"))
           away = str(row.get("away_team", "AWAY"))
           gameday = str(row.get("gameday", "TBD"))
 
           h_val = abs(hash(away + home + str(selected_week)))
-          
-          # Pull live market spread directly from API lookup keyed by (away, home)
+
           live_spread = live_spread_lookup.get((away, home))
           if live_spread is not None:
             market_spread = float(live_spread)
           else:
             market_spread = round((h_val % 13) - 6.0, 1)
 
-          # Pull live market total (O/U) directly from API lookup
           live_total = live_total_lookup.get((away, home))
           if live_total is not None:
             market_ou = float(live_total)
@@ -1415,7 +1598,6 @@ elif tab_selection == "🏈 Weekly Spread & O/U Matrix":
           model_ou_offset = ((h_val % 5) - 2) * 1.0
           model_ou = round(market_ou + model_ou_offset, 1)
 
-          # Correct spread string formatting (preventing backward signs)
           if market_spread < 0:
             mkt_spread_str = f"{home} {market_spread}"
           elif market_spread > 0:
@@ -1433,17 +1615,29 @@ elif tab_selection == "🏈 Weekly Spread & O/U Matrix":
           spread_diff = model_spread - market_spread
           if abs(spread_diff) >= 1.0:
             if market_spread < 0:
-              spread_rec = f"{home} {market_spread}" if spread_diff < 0 else f"{away} +{abs(market_spread)}"
+              spread_rec = (
+                  f"{home} {market_spread}"
+                  if spread_diff < 0
+                  else f"{away} +{abs(market_spread)}"
+              )
             elif market_spread > 0:
-              spread_rec = f"{home} +{market_spread}" if spread_diff < 0 else f"{away} -{market_spread}"
+              spread_rec = (
+                  f"{home} +{market_spread}"
+                  if spread_diff < 0
+                  else f"{away} -{market_spread}"
+              )
             else:
-              spread_rec = f"{home} 0.0" if model_spread < 0 else f"{away} -0.0"
+              spread_rec = (
+                  f"{home} 0.0" if model_spread < 0 else f"{away} -0.0"
+              )
           else:
             spread_rec = "PASS"
 
           ou_diff = model_ou - market_ou
           if abs(ou_diff) >= 1.0:
-            ou_rec = f"Over {market_ou}" if ou_diff > 0 else f"Under {market_ou}"
+            ou_rec = (
+                f"Over {market_ou}" if ou_diff > 0 else f"Under {market_ou}"
+            )
           else:
             ou_rec = "PASS"
 
@@ -1452,33 +1646,84 @@ elif tab_selection == "🏈 Weekly Spread & O/U Matrix":
           confidence_val = round(52.0 + (total_edge * 3.5) + variance_factor, 1)
           confidence_val = min(max(confidence_val, 49.5), 76.5)
 
+          matrix_table_rows.append({
+              "Date": gameday,
+              "Matchup": f"{away} @ {home}",
+              "Market Spread": mkt_spread_str,
+              "Model Spread": model_spread_str,
+              "Spread Recommendation": spread_rec,
+              "Market O/U": market_ou,
+              "Model O/U": model_ou,
+              "O/U Recommendation": ou_rec,
+              "Confidence %": f"{confidence_val}%",
+          })
+
           cols = st.columns([1.0, 1.4, 1.1, 1.1, 1.1, 0.9, 0.9, 1.0, 0.8, 0.8])
-          
+
           with cols[0]:
-            st.markdown(f"<span style='color: #f3f4f6; font-size: 0.85rem;'>{gameday}</span>", unsafe_allow_html=True)
+            st.markdown(
+                f"<span style='color: #f3f4f6; font-size:"
+                f" 0.85rem;'>{gameday}</span>",
+                unsafe_allow_html=True,
+            )
           with cols[1]:
-            st.markdown(f"<span style='color: #f3f4f6; font-size: 0.85rem; font-weight: 600;'>{away} @ {home}</span>", unsafe_allow_html=True)
+            st.markdown(
+                f"<span style='color: #f3f4f6; font-size: 0.85rem; font-weight:"
+                f" 600;'>{away} @ {home}</span>",
+                unsafe_allow_html=True,
+            )
           with cols[2]:
-            st.markdown(f"<span style='color: #f3f4f6; font-size: 0.85rem;'>{mkt_spread_str}</span>", unsafe_allow_html=True)
+            st.markdown(
+                f"<span style='color: #f3f4f6; font-size:"
+                f" 0.85rem;'>{mkt_spread_str}</span>",
+                unsafe_allow_html=True,
+            )
           with cols[3]:
-            st.markdown(f"<span style='color: #10b981; font-size: 0.85rem; font-weight: 600;'>{model_spread_str}</span>", unsafe_allow_html=True)
+            st.markdown(
+                f"<span style='color: #10b981; font-size: 0.85rem; font-weight:"
+                f" 600;'>{model_spread_str}</span>",
+                unsafe_allow_html=True,
+            )
           with cols[4]:
             s_color = "#10b981" if spread_rec != "PASS" else "#9ca3af"
-            st.markdown(f"<span style='color: {s_color}; font-size: 0.85rem; font-weight: 700;'>{spread_rec}</span>", unsafe_allow_html=True)
+            st.markdown(
+                f"<span style='color: {s_color}; font-size: 0.85rem; font-weight:"
+                f" 700;'>{spread_rec}</span>",
+                unsafe_allow_html=True,
+            )
           with cols[5]:
-            st.markdown(f"<span style='color: #f3f4f6; font-size: 0.85rem;'>{market_ou}</span>", unsafe_allow_html=True)
+            st.markdown(
+                f"<span style='color: #f3f4f6; font-size:"
+                f" 0.85rem;'>{market_ou}</span>",
+                unsafe_allow_html=True,
+            )
           with cols[6]:
-            st.markdown(f"<span style='color: #10b981; font-size: 0.85rem; font-weight: 600;'>{model_ou}</span>", unsafe_allow_html=True)
+            st.markdown(
+                f"<span style='color: #10b981; font-size: 0.85rem; font-weight:"
+                f" 600;'>{model_ou}</span>",
+                unsafe_allow_html=True,
+            )
           with cols[7]:
             o_color = "#10b981" if ou_rec != "PASS" else "#9ca3af"
-            st.markdown(f"<span style='color: {o_color}; font-size: 0.85rem; font-weight: 700;'>{ou_rec}</span>", unsafe_allow_html=True)
+            st.markdown(
+                f"<span style='color: {o_color}; font-size: 0.85rem; font-weight:"
+                f" 700;'>{ou_rec}</span>",
+                unsafe_allow_html=True,
+            )
           with cols[8]:
-            st.markdown(f"<span style='color: #f3f4f6; font-size: 0.85rem;'>{confidence_val}%</span>", unsafe_allow_html=True)
+            st.markdown(
+                f"<span style='color: #f3f4f6; font-size:"
+                f" 0.85rem;'>{confidence_val}%</span>",
+                unsafe_allow_html=True,
+            )
 
           with cols[9]:
             csv_bytes = generate_row_csv(
                 bet_type="Spread & O/U Matrix",
-                selection=f"{away} @ {home} — Spread Rec: {spread_rec} | O/U Rec: {ou_rec}",
+                selection=(
+                    f"{away} @ {home} — Spread Rec: {spread_rec} | O/U Rec:"
+                    f" {ou_rec}"
+                ),
                 odds=-110,
                 units=1.0,
                 model_prob=confidence_val / 100.0,
@@ -1495,6 +1740,22 @@ elif tab_selection == "🏈 Weekly Spread & O/U Matrix":
               "<hr style='margin: 4px 0px; border-color: #1f2937;'>",
               unsafe_allow_html=True,
           )
+
+        # Full Spread Matrix Table Download Button
+        st.markdown("<br>", unsafe_allow_html=True)
+        matrix_df = pd.DataFrame(matrix_table_rows)
+        full_matrix_csv = matrix_df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label=(
+                "📥 Download Full Spread Matrix Table to CSV / Excel (Week"
+                f" {selected_week})"
+            ),
+            data=full_matrix_csv,
+            file_name=f"nfl_spread_matrix_week_{selected_week}.csv",
+            mime="text/csv",
+            key="dl_full_matrix_table",
+            use_container_width=True,
+        )
       else:
         st.warning("No matchups scheduled for this week.")
     else:
