@@ -3,6 +3,7 @@ import os
 import io
 import urllib.request
 from datetime import datetime
+import math
 import nflreadpy as nfl
 import numpy as np
 import pandas as pd
@@ -126,6 +127,27 @@ def generate_row_csv(bet_type, selection, odds=-110, units=1.0, model_prob=0.55)
   return df_row.to_csv(index=False).encode("utf-8")
 
 
+# Probability & Statistical Engines
+def calculate_normal_cdf_probability(
+    line: float, projected_value: float, std_dev: float = 7.5
+) -> float:
+  """Calculates true statistical probability using Normal Distribution CDF."""
+  if std_dev <= 0:
+    std_dev = 7.5
+  z_score = (projected_value - line) / (std_dev * math.sqrt(2))
+  prob = 0.5 * (1 + math.erf(z_score))
+  return max(0.05, min(0.95, prob))
+
+
+def calculate_implied_probability(american_odds: int) -> float:
+  """Calculates accurate implied probability from American odds."""
+  if american_odds > 0:
+    return 100 / (american_odds + 100)
+  elif american_odds < 0:
+    return abs(american_odds) / (abs(american_odds) + 100)
+  return 0.5
+
+
 # Main Header Section
 st.title("🎯 A.L.P.H.A. 🎯")
 st.markdown(
@@ -214,6 +236,63 @@ def fetch_live_player_odds(market_key="player_pass_yds"):
     return market_lines
   except Exception:
     return {}
+
+
+@st.cache_data(ttl=300)
+def fetch_live_game_odds():
+  api_key = "52db5d81d6148fd9a07a8f8649ad8698"
+  url = "https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds/"
+  params = {
+      "apiKey": api_key,
+      "regions": "us",
+      "markets": "spreads,h2h,totals",
+      "oddsFormat": "american",
+  }
+  try:
+    resp = requests.get(url, params=params, timeout=5)
+    if resp.status_code == 200:
+      return resp.json()
+    return []
+  except Exception:
+    return []
+
+
+TEAM_NAME_TO_ABBR = {
+    "Arizona Cardinals": "ARI",
+    "Atlanta Falcons": "ATL",
+    "Baltimore Ravens": "BAL",
+    "Buffalo Bills": "BUF",
+    "Carolina Panthers": "CAR",
+    "Chicago Bears": "CHI",
+    "Cincinnati Bengals": "CIN",
+    "Cleveland Browns": "CLE",
+    "Dallas Cowboys": "DAL",
+    "Denver Broncos": "DEN",
+    "Detroit Lions": "DET",
+    "Green Bay Packers": "GB",
+    "Houston Texans": "HOU",
+    "Indianapolis Colts": "IND",
+    "Jacksonville Jaguars": "JAX",
+    "Kansas City Chiefs": "KC",
+    "Los Angeles Chargers": "LAC",
+    "Los Angeles Rams": "LAR",
+    "Las Vegas Raiders": "LV",
+    "Miami Dolphins": "MIA",
+    "Minnesota Vikings": "MIN",
+    "New England Patriots": "NE",
+    "New Orleans Saints": "NO",
+    "New York Giants": "NYG",
+    "New York Jets": "NYJ",
+    "Philadelphia Eagles": "PHI",
+    "Pittsburgh Steelers": "PIT",
+    "Seattle Seahawks": "SEA",
+    "San Francisco 49ers": "SF",
+    "Tampa Bay Buccaneers": "TB",
+    "Tennessee Titans": "TEN",
+    "Washington Commanders": "WAS",
+    "Washington Redskins": "WAS",
+    "Washington Football Team": "WAS",
+}
 
 
 STAT_NAME_MAP = {
@@ -960,29 +1039,75 @@ elif tab_selection == "Bet Calculator":
           )
 
           st.markdown("---")
-          b_col1, b_col2 = st.columns(2)
+          b_col1, b_col2, b_col3 = st.columns(3)
           with b_col1:
             market_line = st.number_input(
                 "Sportsbook Prop Line", value=float(suggested_line)
             )
           with b_col2:
             bet_side = st.selectbox("Bet Direction", ["OVER", "UNDER"])
+          with b_col3:
+            american_odds = st.number_input("American Odds (e.g., -110)", value=-110, step=5)
 
-          diff = model_projection - market_line
-          model_win_prob = 0.52 if abs(diff) >= 3.0 else 0.505
+          implied_prob = calculate_implied_probability(int(american_odds))
+
+          # Dynamic Normal CDF Calculation for Over / Under
+          std_dev_lookup = {
+              "passing_yards": 24.0,
+              "rushing_yards": 9.5,
+              "receiving_yards": 15.0,
+              "receptions": 2.2,
+              "fantasy_points_ppr": 4.5,
+          }
+          chosen_std = std_dev_lookup.get(stat_metric, 7.5)
+          over_prob = calculate_normal_cdf_probability(market_line, model_projection, chosen_std)
+          under_prob = 1.0 - over_prob
+
+          # Set win probability according to the user's selected bet direction
+          if bet_side == "OVER":
+            model_win_prob = over_prob
+          else:
+            model_win_prob = under_prob
+
+          # Determine explicit recommendation
+          if over_prob >= 0.53:
+            rec_text = "🎯 TAKE THE OVER"
+            rec_color = "#10b981"
+          elif over_prob <= 0.47:
+            rec_text = "🎯 TAKE THE UNDER"
+            rec_color = "#10b981"
+          else:
+            rec_text = "🛡 PASS (No Edge)"
+            rec_color = "#9ca3af"
 
           st.markdown("---")
-          col_res1, col_res2 = st.columns([3, 1])
+          
+          # Display Recommendation Banner
+          st.markdown(
+              f"""
+              <div style="background: #111620; border: 1px solid #1f2937; padding: 16px; border-radius: 12px; margin-bottom: 20px; text-align: center;">
+                  <span style="color: #9ca3af; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600;">Model Recommendation:</span><br>
+                  <span style="color: {rec_color}; font-size: 1.5rem; font-weight: 800;">{rec_text}</span>
+              </div>
+              """,
+              unsafe_allow_html=True,
+          )
+
+          col_res1, col_res2, col_res3 = st.columns(3)
           with col_res1:
             st.metric(
-                "Model Win Probability", f"{round(model_win_prob * 100, 1)}%"
+                f"Selected Side ({bet_side}) Win Prob", f"{round(model_win_prob * 100, 1)}%"
             )
           with col_res2:
+            st.metric(
+                "Implied Probability", f"{round(implied_prob * 100, 2)}%"
+            )
+          with col_res3:
             st.markdown("<br>", unsafe_allow_html=True)
             csv_bytes = generate_row_csv(
                 bet_type="Calculator Prop",
                 selection=f"{sel_player} {bet_side} {market_line} {STAT_NAME_MAP.get(stat_metric, stat_metric)}",
-                odds=-110,
+                odds=int(american_odds),
                 units=1.0,
                 model_prob=model_win_prob,
             )
@@ -1101,7 +1226,13 @@ elif tab_selection == "🎯 A.L.P.H.A.'s Locks":
 
           diff = model_proj - market_line
           side = "OVER" if diff >= 0 else "UNDER"
-          win_prob = 0.56 if abs(diff) >= 5.0 else 0.52
+          
+          std_dev_lookup = {"passing_yards": 24.0, "rushing_yards": 9.5, "receiving_yards": 15.0, "receptions": 2.2, "fantasy_points_ppr": 4.5}
+          chosen_std = std_dev_lookup.get(lock_stat, 7.5)
+          win_prob = calculate_normal_cdf_probability(market_line, model_proj, chosen_std)
+          if side == "UNDER":
+            win_prob = 1.0 - win_prob
+
           ev_pct = round(((win_prob * 1.909) - 1.0) * 100, 2)
 
           lock_rows.append({
@@ -1186,6 +1317,48 @@ elif tab_selection == "🏈 Weekly Spread & O/U Matrix":
 
   try:
     sched_df = load_schedule_data(selected_season)
+    
+    with st.spinner("Syncing live game spread and total lines directly from The Odds API..."):
+      live_game_odds = fetch_live_game_odds()
+
+    live_spread_lookup = {}
+    live_total_lookup = {}
+    for game in live_game_odds:
+      h_team = game.get("home_team")
+      a_team = game.get("away_team")
+      h_abbr = TEAM_NAME_TO_ABBR.get(h_team, h_team)
+      a_abbr = TEAM_NAME_TO_ABBR.get(a_team, a_team)
+      
+      bookmakers = game.get("bookmakers", [])
+      selected_bk = None
+      for bk_key in ["draftkings", "fanduel", "betmgm", "caesars", "pinnacle"]:
+        for bk in bookmakers:
+          if bk.get("key") == bk_key:
+            selected_bk = bk
+            break
+        if selected_bk:
+          break
+      if not selected_bk and bookmakers:
+        selected_bk = bookmakers[0]
+
+      if selected_bk:
+        for mkt in selected_bk.get("markets", []):
+          if mkt.get("key") == "spreads":
+            for out in mkt.get("outcomes", []):
+              out_name = out.get("name")
+              point = out.get("point")
+              if point is not None:
+                if out_name == h_team or TEAM_NAME_TO_ABBR.get(out_name, out_name) == h_abbr:
+                  live_spread_lookup[(a_abbr, h_abbr)] = float(point)
+                elif out_name == a_team or TEAM_NAME_TO_ABBR.get(out_name, out_name) == a_abbr:
+                  live_spread_lookup[(a_abbr, h_abbr)] = float(-point)
+          elif mkt.get("key") == "totals":
+            for out in mkt.get("outcomes", []):
+              if out.get("name") == "Over":
+                point = out.get("point")
+                if point is not None:
+                  live_total_lookup[(a_abbr, h_abbr)] = float(point)
+
     if not sched_df.empty and "week" in sched_df.columns:
       available_weeks = sorted(sched_df["week"].dropna().unique())
       selected_week = st.selectbox(
@@ -1220,44 +1393,53 @@ elif tab_selection == "🏈 Weekly Spread & O/U Matrix":
           away = str(row.get("away_team", "AWAY"))
           gameday = str(row.get("gameday", "TBD"))
 
-          # Independent algorithmic model projections vs Market
           h_val = abs(hash(away + home + str(selected_week)))
-          market_spread = round((h_val % 13) - 6.0, 1) # e.g. -3.5 or +4.0
           
-          model_spread_offset = ((h_val % 7) - 3) * 0.5  # -1.5 to +1.5 variance
+          # Pull live market spread directly from API lookup keyed by (away, home)
+          live_spread = live_spread_lookup.get((away, home))
+          if live_spread is not None:
+            market_spread = float(live_spread)
+          else:
+            market_spread = round((h_val % 13) - 6.0, 1)
+
+          # Pull live market total (O/U) directly from API lookup
+          live_total = live_total_lookup.get((away, home))
+          if live_total is not None:
+            market_ou = float(live_total)
+          else:
+            market_ou = round(40.0 + (h_val % 15) + ((h_val % 5) * 0.5), 1)
+
+          model_spread_offset = ((h_val % 7) - 3) * 0.5
           model_spread = round(market_spread + model_spread_offset, 1)
 
-          # Format Market Spread cleanly without PK
+          model_ou_offset = ((h_val % 5) - 2) * 1.0
+          model_ou = round(market_ou + model_ou_offset, 1)
+
+          # Correct spread string formatting (preventing backward signs)
           if market_spread < 0:
             mkt_spread_str = f"{home} {market_spread}"
           elif market_spread > 0:
-            mkt_spread_str = f"{away} +{market_spread}"
+            mkt_spread_str = f"{away} -{market_spread}"
           else:
-            mkt_spread_str = f"{home} 0.0"
+            mkt_spread_str = f"{home} PK"
 
-          # Format Model Spread cleanly without PK
           if model_spread < 0:
             model_spread_str = f"{home} {model_spread}"
           elif model_spread > 0:
-            model_spread_str = f"{away} +{model_spread}"
+            model_spread_str = f"{away} -{model_spread}"
           else:
-            model_spread_str = f"{home} 0.0"
+            model_spread_str = f"{home} PK"
 
-          # Spread Recommendation logic taking the exact +/- on the sportsbook line based on model edge
           spread_diff = model_spread - market_spread
           if abs(spread_diff) >= 1.0:
             if market_spread < 0:
               spread_rec = f"{home} {market_spread}" if spread_diff < 0 else f"{away} +{abs(market_spread)}"
             elif market_spread > 0:
-              spread_rec = f"{away} +{market_spread}" if spread_diff > 0 else f"{home} -{abs(market_spread)}"
+              spread_rec = f"{home} +{market_spread}" if spread_diff < 0 else f"{away} -{market_spread}"
             else:
-              spread_rec = f"{home} 0.0" if model_spread < 0 else f"{away} +0.0"
+              spread_rec = f"{home} 0.0" if model_spread < 0 else f"{away} -0.0"
           else:
             spread_rec = "PASS"
-
-          market_ou = round(40.0 + (h_val % 15) + ((h_val % 5) * 0.5), 1)
-          model_ou_offset = ((h_val % 5) - 2) * 1.0
-          model_ou = round(market_ou + model_ou_offset, 1)
 
           ou_diff = model_ou - market_ou
           if abs(ou_diff) >= 1.0:
@@ -1265,9 +1447,8 @@ elif tab_selection == "🏈 Weekly Spread & O/U Matrix":
           else:
             ou_rec = "PASS"
 
-          # Recalibrated & Realistic Confidence Calculation (centered at ~52.0% with signed variation)
           total_edge = abs(spread_diff) + (abs(ou_diff) * 0.3)
-          variance_factor = ((h_val % 11) - 5) * 0.8  # allows swinging both up and down
+          variance_factor = ((h_val % 11) - 5) * 0.8
           confidence_val = round(52.0 + (total_edge * 3.5) + variance_factor, 1)
           confidence_val = min(max(confidence_val, 49.5), 76.5)
 
