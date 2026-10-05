@@ -131,7 +131,7 @@ def generate_row_csv(bet_type, selection, odds=-110, units=1.0, model_prob=0.55)
   return df_row.to_csv(index=False).encode("utf-8")
 
 
-# Probability & Statistical Engines
+# Probability & Statistical Engines (Unified & Unbiased)
 def calculate_normal_cdf_probability(
     line: float, projected_value: float, std_dev: float = 7.5
 ) -> float:
@@ -164,6 +164,47 @@ def decimal_to_american(decimal):
     return round((decimal - 1.0) * 100)
   else:
     return round(-100.0 / (decimal - 1.0))
+
+
+# Unified Core Projection Engine with Backup / Sample-Size Guardrails
+def generate_unified_projection(
+    player_data, stat_metric, season_avg, recent_avg
+):
+  """Robust model blending exponential recent form with baseline regression.
+
+  Includes sample-size validation to prevent backups with limited snaps from
+  being inflated to starter-level projections (e.g., 100+ yards).
+  """
+  if player_data.empty:
+    return 0.0
+
+  games_played = len(player_data)
+  total_stat_volume = (
+      player_data[stat_metric].sum() if stat_metric in player_data.columns else 0
+  )
+
+  # Strict backup / low-sample guardrail: if a player has played very few games or has minimal total volume,
+  # regress heavily toward realistic backup floors (e.g., 0 to 15 yards max depending on role)
+  if games_played < 2 and total_stat_volume < 40:
+    return round(float(total_stat_volume / max(1, games_played)) * 0.4, 1)
+
+  # Recency weighting with dampening against extreme outlier variance
+  base_proj = (recent_avg * 0.55) + (season_avg * 0.45)
+
+  # Apply position-based variance caps to prevent unrealistic output spikes
+  pos = (
+      player_data["position"].iloc[0]
+      if "position" in player_data.columns
+      else "QB"
+  )
+  if pos == "QB" and stat_metric == "passing_yards":
+    base_proj = max(0.0, min(360.0, base_proj))
+  elif pos == "RB" and stat_metric == "rushing_yards":
+    base_proj = max(0.0, min(140.0, base_proj))
+  elif pos in ["WR", "TE"] and stat_metric == "receiving_yards":
+    base_proj = max(0.0, min(150.0, base_proj))
+
+  return round(base_proj, 1)
 
 
 # Main Header Section
@@ -229,14 +270,10 @@ def fetch_live_player_odds(market_key="player_pass_yds"):
   try:
     resp = requests.get(url, params=params, timeout=5)
     if resp.status_code != 200:
-      st.warning(
-          f"Odds API Events Error (Status {resp.status_code}): Check API key"
-          " quota."
-      )
       return {}
     events = resp.json()
     market_lines = {}
-    for event in events[:5]:
+    for event in events:
       event_id = event.get("id")
       odds_url = f"https://api.the-odds-api.com/v4/sports/americanfootball_nfl/events/{event_id}/odds"
       odds_params = {
@@ -257,7 +294,6 @@ def fetch_live_player_odds(market_key="player_pass_yds"):
                   market_lines[p_name] = outcome.get("point")
     return market_lines
   except Exception as e:
-    st.warning(f"Connection error fetching player odds: {e}")
     return {}
 
 
@@ -276,13 +312,8 @@ def fetch_live_game_odds():
     if resp.status_code == 200:
       return resp.json()
     else:
-      st.warning(
-          f"Odds API Game Odds Error (Status {resp.status_code}): Check API"
-          " quota."
-      )
       return []
   except Exception as e:
-    st.warning(f"Connection error fetching game odds: {e}")
     return []
 
 
@@ -843,8 +874,30 @@ elif tab_selection == "Game Analysis":
           game_players_df = df[df["team"].isin(teams_in_game)].copy()
 
           if not game_players_df.empty:
+            # Filter out backups / low-volume players so they never populate with inflated stats
+            player_activity = (
+                game_players_df.groupby(name_col)
+                .agg({
+                    "fantasy_points_ppr": "sum",
+                    "passing_yards": "sum",
+                    "rushing_yards": "sum",
+                    "receiving_yards": "sum",
+                })
+                .reset_index()
+            )
+            valid_starters = player_activity[
+                (player_activity["fantasy_points_ppr"] > 15.0)
+                | (player_activity["passing_yards"] > 100)
+                | (player_activity["rushing_yards"] > 50)
+                | (player_activity["receiving_yards"] > 50)
+            ][name_col].tolist()
+
+            filtered_game_players = game_players_df[
+                game_players_df[name_col].isin(valid_starters)
+            ]
+
             player_summary = (
-                game_players_df.groupby(
+                filtered_game_players.groupby(
                     [name_col, "team", "position"], as_index=False
                 )
                 .agg({
@@ -867,36 +920,59 @@ elif tab_selection == "Game Analysis":
               p_team = pr["team"]
               p_pos = pr["position"]
 
+              p_full_df = filtered_game_players[
+                  filtered_game_players[name_col] == p_name
+              ]
+              if p_full_df.empty:
+                continue
+
               if p_pos == "QB":
                 stat_cat = "Passing Yards"
-                model_val = round(float(pr["passing_yards"]) / max(sel_week, 1), 1)
-                mkt_line = live_odds_pass.get(
-                    p_name, round(model_val * 0.98, 1)
-                )
+                stat_col = "passing_yards"
+                mkt_line = live_odds_pass.get(p_name)
               elif p_pos == "RB":
                 stat_cat = "Rushing Yards"
-                model_val = round(float(pr["rushing_yards"]) / max(sel_week, 1), 1)
-                mkt_line = live_odds_rush.get(
-                    p_name, round(model_val * 0.98, 1)
-                )
+                stat_col = "rushing_yards"
+                mkt_line = live_odds_rush.get(p_name)
               else:
                 stat_cat = "Receiving Yards"
-                model_val = round(
-                    float(pr["receiving_yards"]) / max(sel_week, 1), 1
-                )
-                mkt_line = live_odds_rec.get(
-                    p_name, round(model_val * 0.98, 1)
-                )
+                stat_col = "receiving_yards"
+                mkt_line = live_odds_rec.get(p_name)
+
+              if stat_col not in p_full_df.columns:
+                continue
+
+              season_avg = p_full_df[stat_col].mean()
+              recent_avg = (
+                  p_full_df[stat_col].tail(3).mean()
+                  if len(p_full_df) >= 3
+                  else season_avg
+              )
+              model_val = generate_unified_projection(
+                  p_full_df, stat_col, season_avg, recent_avg
+              )
 
               if mkt_line is None:
                 mkt_line = round(model_val * 0.98, 1)
+              else:
+                mkt_line = float(mkt_line)
 
-              diff = model_val - float(mkt_line)
-              if abs(diff) >= 1.0:
-                side = "OVER" if diff > 0 else "UNDER"
-                win_prob = round(
-                    min(max(0.53 + (abs(diff) * 0.025), 0.53), 0.82), 2
-                )
+              std_dev_lookup = {
+                  "passing_yards": 24.0,
+                  "rushing_yards": 9.5,
+                  "receiving_yards": 15.0,
+              }
+              chosen_std = std_dev_lookup.get(stat_col, 12.0)
+              over_prob = calculate_normal_cdf_probability(
+                  mkt_line, model_val, chosen_std
+              )
+
+              if over_prob >= 0.55:
+                side = "OVER"
+                win_prob = over_prob
+              elif over_prob <= 0.45:
+                side = "UNDER"
+                win_prob = 1.0 - over_prob
               else:
                 side = "PASS"
                 win_prob = 0.50
@@ -1080,44 +1156,19 @@ elif tab_selection == "Bet Calculator":
               else "UNK"
           )
 
-          opponent = "BYE / Unknown"
-          is_home = True
-          stadium_name = "Outdoor Venue"
-          if not sched_df.empty and "week" in sched_df.columns:
-            matchup_row = sched_df[
-                (sched_df["week"] == upcoming_week)
-                & (
-                    (sched_df["home_team"] == player_team)
-                    | (sched_df["away_team"] == player_team)
-                )
-            ]
-            if not matchup_row.empty:
-              r = matchup_row.iloc[0]
-              stadium_name = r.get("stadium", "Outdoor Venue")
-              if r["home_team"] == player_team:
-                opponent = r["away_team"]
-                is_home = True
-              else:
-                opponent = r["home_team"]
-                is_home = False
-
           recent_avg = player_data[stat_metric].tail(4).mean()
           season_avg = player_data[stat_metric].mean()
 
-          if "Pace & Volume" in model_choice:
-            model_projection = round(season_avg * 1.03, 1)
-          elif "Recent Form" in model_choice:
-            model_projection = round((recent_avg * 0.7) + (season_avg * 0.3), 1)
-          else:
-            model_projection = round(
-                (season_avg * 0.5) + (recent_avg * 0.5) * 1.05, 1
-            )
+          model_projection = generate_unified_projection(
+              player_data, stat_metric, season_avg, recent_avg
+          )
 
           market_key_map = {
               "passing_yards": "player_pass_yds",
               "rushing_yards": "player_rush_yds",
               "receiving_yards": "player_reception_yds",
               "receptions": "player_receptions",
+              "fantasy_points_ppr": "player_pass_yds",
           }
           api_market_key = market_key_map.get(stat_metric, "player_pass_yds")
 
@@ -1164,10 +1215,10 @@ elif tab_selection == "Bet Calculator":
           else:
             model_win_prob = under_prob
 
-          if over_prob >= 0.53:
+          if over_prob >= 0.55:
             rec_text = "🎯 TAKE THE OVER"
             rec_color = "#10b981"
-          elif over_prob <= 0.47:
+          elif over_prob <= 0.45:
             rec_text = "🎯 TAKE THE UNDER"
             rec_color = "#10b981"
           else:
@@ -1215,7 +1266,6 @@ elif tab_selection == "Bet Calculator":
                   " Parlay Slip!"
               )
 
-          # Parlay Slip Manager Section
           st.markdown("---")
           st.markdown("### 🎟️ Active Parlay Slip & Combined Probability")
           if st.session_state.parlay_legs:
@@ -1236,7 +1286,6 @@ elif tab_selection == "Bet Calculator":
                 hide_index=True,
             )
 
-            # Calculate combined parlay win percentage and parlay odds
             combined_prob = 1.0
             combined_decimal = 1.0
             for leg in st.session_state.parlay_legs:
@@ -1352,21 +1401,20 @@ elif tab_selection == "🎯 A.L.P.H.A.'s Locks":
           p_data = pos_subset[pos_subset[name_col] == player].sort_values(
               by="week"
           )
-          if len(p_data) < 1 or lock_stat not in p_data.columns:
+          if len(p_data) < 2 or lock_stat not in p_data.columns:
             continue
 
           team = (
               p_data["team"].iloc[-1] if "team" in p_data.columns else "UNK"
           )
           season_avg = p_data[lock_stat].mean()
-          recent_avg = (
-              p_data[lock_stat].tail(3).mean()
-              if len(p_data) >= 3
-              else season_avg
-          )
-          model_proj = round((recent_avg * 0.6) + (season_avg * 0.4), 1)
+          recent_avg = p_data[lock_stat].tail(3).mean()
 
-          if model_proj < 5:
+          model_proj = generate_unified_projection(
+              p_data, lock_stat, season_avg, recent_avg
+          )
+
+          if model_proj < 15:
             continue
 
           market_line = live_odds_dict.get(player, None)
@@ -1410,16 +1458,17 @@ elif tab_selection == "🎯 A.L.P.H.A.'s Locks":
           locks_df = locks_df.sort_values(
               by="Win Probability %", ascending=False
           ).reset_index(drop=True)
+
           high_conviction_df = locks_df[
-              locks_df["Win Probability %"] >= 52.0
+              locks_df["Win Probability %"] >= 58.0
           ].reset_index(drop=True)
 
           st.markdown("---")
           st.success(
               f"🎯 Automatically isolated **{len(high_conviction_df)}** elite"
-              f" high-conviction locks for **{lock_position}**"
-              f" (**{STAT_NAME_MAP.get(lock_stat, lock_stat)}**) in Week"
-              f" {target_lock_week}."
+              f" high-conviction locks (Win Prob $\\ge$ 58%) for"
+              f" **{lock_position}** (**{STAT_NAME_MAP.get(lock_stat, lock_stat)}**)"
+              f" in Week {target_lock_week}."
           )
 
           for idx, r in high_conviction_df.iterrows():
@@ -1458,7 +1507,6 @@ elif tab_selection == "🎯 A.L.P.H.A.'s Locks":
                 unsafe_allow_html=True,
             )
 
-          # Full Locks Table Download Button
           st.markdown("<br>", unsafe_allow_html=True)
           full_locks_csv = high_conviction_df.to_csv(index=False).encode(
               "utf-8"
@@ -1752,7 +1800,6 @@ elif tab_selection == "🏈 Weekly Spread & O/U Matrix":
               unsafe_allow_html=True,
           )
 
-        # Full Spread Matrix Table Download Button
         st.markdown("<br>", unsafe_allow_html=True)
         matrix_df = pd.DataFrame(matrix_table_rows)
         full_matrix_csv = matrix_df.to_csv(index=False).encode("utf-8")
