@@ -25,28 +25,22 @@ if "parlay_legs" not in st.session_state:
 st.markdown(
     """
     <style>
-    /* Force Full Dark Theme on Main Container */
     .stApp {
         background-color: #0b0f15 !important;
         color: #d2d6dc !important;
     }
-    
-    /* Make Sidebar Compact and Narrow */
     section[data-testid="stSidebar"] {
         background-color: #070a0e !important;
         border-right: 1px solid #1f2937;
         min-width: 220px !important;
         max-width: 240px !important;
     }
-
-    /* Fix Sidebar Radio Button Text Visibility */
     section[data-testid="stSidebar"] .stRadio label {
         color: #e5e7eb !important;
         font-weight: 500;
         font-size: 0.95rem !important;
         padding: 4px 0px;
     }
-    
     div[data-testid="stRadio"] label, 
     div[data-testid="stRadio"] label p, 
     div[data-testid="stRadio"] label span,
@@ -54,8 +48,6 @@ st.markdown(
         color: #ffffff !important;
         font-weight: 600 !important;
     }
-
-    /* Sleek Container Cards & Allow Metric Labels to Wrap */
     div[data-testid="stMetric"] {
         background: #111620;
         border: 1px solid #1f2937;
@@ -77,8 +69,6 @@ st.markdown(
         font-weight: 700;
         font-size: 1.5rem !important;
     }
-
-    /* Custom Card Styling for Matchup Banner */
     .custom-metric-card {
         background: #111620;
         border: 1px solid #1f2937;
@@ -103,11 +93,8 @@ st.markdown(
         font-weight: 700;
         font-size: 1.35rem !important;
     }
-
-    /* Modern Headers */
     h1 { font-weight: 800; letter-spacing: -0.03em; color: #f3f4f6 !important; }
     h2, h3 { font-weight: 700; letter-spacing: -0.02em; color: #e5e7eb !important; }
-    
     hr { border-color: #1f2937; margin-top: 1.2rem; margin-bottom: 1.2rem; }
     </style>
 """,
@@ -115,56 +102,115 @@ st.markdown(
 )
 
 
-# Helper Function to Generate Single-Row CSV Download Bytes
-def generate_row_csv(bet_type, selection, odds=-110, units=1.0, model_prob=0.55):
+def generate_row_csv(bet_type, selection, units=1.0, model_prob=0.55):
     df_row = pd.DataFrame([{
         "Date": datetime.now().strftime("%Y-%m-%d"),
         "Bet Type": bet_type,
         "Selection": selection,
-        "Odds": odds,
         "Units": units,
         "Model Win %": f"{model_prob * 100:.1f}%",
         "Result": "Pending",
         "Profit/Loss": 0.0,
-        "Closing Odds": "",
     }])
     return df_row.to_csv(index=False).encode("utf-8")
 
 
-# Probability & Statistical Engines
-def calculate_normal_cdf_probability(
-    line: float, projected_value: float, std_dev: float = 7.5
-) -> float:
-    if std_dev <= 0:
-        std_dev = 7.5
-    z_score = (projected_value - line) / std_dev
-    prob = 0.5 * (1 + math.erf(z_score / math.sqrt(2)))
-    return max(0.05, min(0.95, prob))
+@st.cache_data
+def load_weekly_data(season):
+    polars_df = nfl.load_player_stats([season])
+    return polars_df.to_pandas()
 
 
-def calculate_implied_probability(american_odds: int) -> float:
-    if american_odds > 0:
-        return 100 / (american_odds + 100)
-    elif american_odds < 0:
-        return abs(american_odds) / (abs(american_odds) + 100)
-    return 0.5
+@st.cache_data
+def load_schedule_data(season):
+    sched_df = nfl.load_schedules([season])
+    return sched_df.to_pandas() if hasattr(sched_df, "to_pandas") else pd.DataFrame(sched_df)
 
 
-def american_to_decimal(odds):
-    if odds > 0:
-        return 1 + (odds / 100.0)
+@st.cache_data
+def load_injury_data(season):
+    try:
+        inj_df = nfl.load_injuries([season])
+        return inj_df.to_pandas() if hasattr(inj_df, "to_pandas") else pd.DataFrame(inj_df)
+    except Exception:
+        return pd.DataFrame()
+
+
+# --- CLEAN STARTER POSITION SELECTION (RAW POSITIONS) ---
+def get_active_team_starters(t_df, name_col, injuries_df, target_week):
+    inactive_players = set()
+    if not injuries_df.empty and "week" in injuries_df.columns and "report_status" in injuries_df.columns:
+        week_inj = injuries_df[(injuries_df["week"] == target_week) & (injuries_df["report_status"].isin(["Out", "Doubtful"]))]
+        if "player_id" in week_inj.columns:
+            inactive_players = set(week_inj["player_id"].dropna().unique())
+
+    if "player_id" in t_df.columns:
+        active_t_df = t_df[~t_df["player_id"].isin(inactive_players)].copy()
     else:
-        return 1 + (100.0 / abs(odds))
+        active_t_df = t_df.copy()
+
+    starters_list = []
+    
+    # QB
+    qb_df = active_t_df[active_t_df["position"] == "QB"]
+    if not qb_df.empty and "attempts" in qb_df.columns:
+        qb_grouped = qb_df.groupby([name_col], as_index=False)["attempts"].sum().sort_values(by="attempts", ascending=False)
+        if not qb_grouped.empty:
+            starters_list.append((qb_grouped.iloc[0][name_col], "QB"))
+
+    # RBs
+    rb_df = active_t_df[active_t_df["position"] == "RB"]
+    if not rb_df.empty and "carries" in rb_df.columns:
+        rb_grouped = rb_df.groupby([name_col], as_index=False)["carries"].sum().sort_values(by="carries", ascending=False)
+        for _, rrow in rb_grouped.head(2).iterrows():
+            starters_list.append((rrow[name_col], "RB"))
+
+    # WRs
+    wr_df = active_t_df[active_t_df["position"] == "WR"]
+    if not wr_df.empty and "targets" in wr_df.columns:
+        wr_grouped = wr_df.groupby([name_col], as_index=False)["targets"].sum().sort_values(by="targets", ascending=False)
+        for _, wrow in wr_grouped.head(3).iterrows():
+            starters_list.append((wrow[name_col], "WR"))
+
+    # TE
+    te_df = active_t_df[active_t_df["position"] == "TE"]
+    if not te_df.empty and "targets" in te_df.columns:
+        te_grouped = te_df.groupby([name_col], as_index=False)["targets"].sum().sort_values(by="targets", ascending=False)
+        if not te_grouped.empty:
+            starters_list.append((te_grouped.iloc[0][name_col], "TE"))
+
+    return starters_list
 
 
-def decimal_to_american(decimal):
-    if decimal >= 2.0:
-        return round((decimal - 1.0) * 100)
+# --- STATISTICAL DISTRIBUTIONS ---
+def poisson_pmf(k: int, lambda_val: float) -> float:
+    if lambda_val <= 0 or k < 0:
+        return 0.0
+    return (math.pow(lambda_val, k) * math.exp(-lambda_val)) / math.factorial(k)
+
+
+def calculate_rigorous_prop_probability(
+    stat_metric: str, line: float, lambda_val: float, spread_std: float = 20.0
+) -> tuple:
+    counting_stats = ["receptions", "carries", "attempts", "passing_tds", "rushing_tds", "receiving_tds", "interceptions"]
+    
+    if stat_metric in counting_stats:
+        lambda_val = max(0.1, lambda_val)
+        floor_line = math.floor(line)
+        under_prob = sum(poisson_pmf(k, lambda_val) for k in range(0, floor_line + 1))
+        over_prob = 1.0 - under_prob
+        return max(0.01, min(0.99, over_prob)), max(0.01, min(0.99, under_prob))
     else:
-        return round(-100.0 / (decimal - 1.0))
+        lambda_val = max(1.0, lambda_val)
+        sigma = max(0.15, spread_std / lambda_val)
+        mu = math.log(lambda_val) - (sigma ** 2) / 2
+        
+        z_score = (math.log(max(0.01, line)) - mu) / sigma
+        under_prob = 0.5 * (1 + math.erf(z_score / math.sqrt(2)))
+        over_prob = 1.0 - under_prob
+        return max(0.01, min(0.99, over_prob)), max(0.01, min(0.99, under_prob))
 
 
-# Advanced Matchup & Environmental Adjustment Engine
 def get_matchup_environmental_multipliers(
     df, team, opponent_team, stat_metric, weather_desc
 ):
@@ -175,64 +221,36 @@ def get_matchup_environmental_multipliers(
                 team_df = df[df["team"] == team]
                 opp_df = df[df["team"] == opponent_team]
 
-                if stat_metric in [
-                    "passing_yards",
-                    "passing_tds",
-                    "receptions",
-                    "attempts",
-                ]:
-                    opp_pass_allowed = (
-                        opp_df["passing_epa"].mean()
-                        if not opp_df.empty
-                        else df["passing_epa"].mean()
-                    )
+                if stat_metric in ["passing_yards", "passing_tds", "receptions", "attempts", "receiving_yards", "targets"]:
+                    opp_pass_allowed = opp_df["passing_epa"].mean() if not opp_df.empty else df["passing_epa"].mean()
                     mult += (opp_pass_allowed - df["passing_epa"].mean()) * 0.15
-                elif stat_metric in [
-                    "rushing_yards",
-                    "rushing_tds",
-                    "carries",
-                    "rush_attempts",
-                ]:
-                    opp_rush_allowed = (
-                        opp_df["rushing_epa"].mean()
-                        if not opp_df.empty
-                        else df["rushing_epa"].mean()
-                    )
+                elif stat_metric in ["rushing_yards", "rushing_tds", "carries", "rush_attempts"]:
+                    opp_rush_allowed = opp_df["rushing_epa"].mean() if not opp_df.empty else df["rushing_epa"].mean()
                     mult += (opp_rush_allowed - df["rushing_epa"].mean()) * 0.15
         except Exception:
             pass
 
     w_str = str(weather_desc).lower()
-    if "high winds" in w_str or "24 mph" in w_str or "wind" in w_str:
-        if stat_metric in ["passing_yards", "passing_tds", "attempts"]:
-            mult *= 0.85
-        elif stat_metric in [
-            "rushing_yards",
-            "rushing_tds",
-            "carries",
-            "rush_attempts",
-        ]:
-            mult *= 1.10
-    elif "heavy rain" in w_str or "rain" in w_str:
-        if stat_metric in ["passing_yards", "receiving_yards"]:
-            mult *= 0.90
-    elif "cold" in w_str or "34°f" in w_str:
+    if any(w in w_str for w in ["wind", "mph", "storm"]):
+        if stat_metric in ["passing_yards", "passing_tds", "attempts", "receiving_yards", "targets"]:
+            mult *= 0.80
+        elif stat_metric in ["rushing_yards", "rushing_tds", "carries"]:
+            mult *= 1.15
+    elif "rain" in w_str:
+        if stat_metric in ["passing_yards", "receiving_yards", "targets"]:
+            mult *= 0.88
+    elif "cold" in w_str or "°f" in w_str:
         if stat_metric in ["passing_yards"]:
-            mult *= 0.95
+            mult *= 0.93
 
-    return max(0.70, min(1.30, mult))
+    return max(0.65, min(1.35, mult))
 
 
-# Data-Driven Spread Calculator incorporating independent team EPA metrics
 def calculate_data_driven_spread(df, away_team, home_team):
     if df.empty or "team" not in df.columns:
         return -2.5
     try:
-        epa_cols = [
-            c
-            for c in ["passing_epa", "rushing_epa", "receiving_epa"]
-            if c in df.columns
-        ]
+        epa_cols = [c for c in ["passing_epa", "rushing_epa", "receiving_epa"] if c in df.columns]
         if epa_cols:
             df["net_epa"] = df[epa_cols].sum(axis=1)
             team_epa = df.groupby("team")["net_epa"].mean().to_dict()
@@ -241,111 +259,150 @@ def calculate_data_driven_spread(df, away_team, home_team):
 
         away_power = team_epa.get(away_team, 0.0)
         home_power = team_epa.get(home_team, 0.0)
-        return round((home_power - away_power) * 3.0 + 2.5, 1)
+        
+        raw_diff = (home_power - away_power) * 2.7
+        adjusted_diff = raw_diff * 0.85 
+        hfa = 2.1 
+        
+        spread = round(adjusted_diff + hfa, 1)
+        return max(-17.5, min(17.5, spread))
     except Exception:
         return -2.5
 
 
-# Dynamic Game Over/Under Total Calculator Engine
+def get_game_win_probability(spread: float) -> tuple:
+    sigma = 13.45
+    z = spread / (sigma * math.sqrt(2))
+    home_win_prob = 0.5 * (1.0 + math.erf(z))
+    away_win_prob = 1.0 - home_win_prob
+    return round(home_win_prob, 3), round(away_win_prob, 3)
+
+
 def calculate_data_driven_total(df, sched_df, away_team, home_team):
-    """Calculates realistic game total (O/U) using team EPA, offensive pace,
-    and actual scoring output, anchored to realistic NFL scoring baselines (~44.5).
-    """
-    baseline_total = 45.0
+    baseline_total = 43.5
     try:
         if not df.empty and "team" in df.columns:
-            epa_cols = [
-                c
-                for c in ["passing_epa", "rushing_epa", "receiving_epa"]
-                if c in df.columns
-            ]
+            epa_cols = [c for c in ["passing_epa", "rushing_epa", "receiving_epa"] if c in df.columns]
             if epa_cols:
                 home_epa = df[df["team"] == home_team][epa_cols].sum(axis=1).mean()
                 away_epa = df[df["team"] == away_team][epa_cols].sum(axis=1).mean()
                 
-                if pd.isna(home_epa):
-                    home_epa = 0.0
-                if pd.isna(away_epa):
-                    away_epa = 0.0
+                home_epa = 0.0 if pd.isna(home_epa) else home_epa
+                away_epa = 0.0 if pd.isna(away_epa) else away_epa
                 
-                epa_adj = (home_epa + away_epa) * 12.0
+                epa_adj = (home_epa + away_epa) * 4.2
                 baseline_total += epa_adj
+
+        if not df.empty and "carries" in df.columns and "attempts" in df.columns:
+            df["total_plays"] = df["carries"].fillna(0) + df["attempts"].fillna(0)
+            team_pace = df.groupby("team")["total_plays"].mean().to_dict()
+            league_avg_pace = df["total_plays"].mean() if not df.empty else 62.0
+            
+            home_plays = team_pace.get(home_team, league_avg_pace)
+            away_plays = team_pace.get(away_team, league_avg_pace)
+            combined_pace_diff = ((home_plays + away_plays) - (league_avg_pace * 2)) * 0.15
+            baseline_total += combined_pace_diff
 
         if not sched_df.empty and "home_score" in sched_df.columns and "away_score" in sched_df.columns:
             completed_games = sched_df.dropna(subset=["home_score", "away_score"])
             if not completed_games.empty:
                 home_pts = completed_games[completed_games["home_team"] == home_team]["home_score"].mean()
                 away_pts = completed_games[completed_games["away_team"] == away_team]["away_score"].mean()
-                
                 if not pd.isna(home_pts) and not pd.isna(away_pts):
-                    scoring_baseline = (home_pts + away_pts) + 21.0
-                    baseline_total = (baseline_total * 0.6) + (scoring_baseline * 0.4)
+                    scoring_baseline = ((home_pts + away_pts) * 0.5) + 22.0
+                    baseline_total = (baseline_total * 0.65) + (scoring_baseline * 0.35)
 
-        return round(max(37.5, min(56.5, baseline_total)), 1)
+        return round(max(37.5, min(54.5, baseline_total)), 1)
     except Exception:
-        return 45.5
+        return 44.0
 
 
-# Unified Core Projection Engine with Game Script & Offensive Efficiency Integration
+# --- NUMPY LEAST-SQUARES REGRESSION PREDICTION ---
+@st.cache_resource
+def get_numpy_linear_prediction(player_vals, recent_val):
+    """Calculates a data-driven linear regression projection using pure NumPy."""
+    if len(player_vals) < 3:
+        return recent_val
+    
+    x = player_vals[:-1]
+    y = player_vals[1:]
+    
+    try:
+        slope, intercept = np.polyfit(x, y, 1)
+        prediction = (slope * recent_val) + intercept
+        return float(prediction)
+    except Exception:
+        return recent_val
+
+
+# --- CALIBRATED UNIFIED PROJECTION ENGINE ---
 def generate_unified_projection(
     player_data,
     stat_metric,
     season_avg,
     recent_avg,
+    market_line=None,
     full_df=None,
     opponent_team=None,
     weather_desc=None,
     team_spread=0.0,
 ):
-    if player_data.empty:
+    if player_data.empty or stat_metric not in player_data.columns:
         return 0.0
 
     games_played = len(player_data)
-    total_stat_volume = (
-        player_data[stat_metric].sum() if stat_metric in player_data.columns else 0
-    )
+    total_stat_volume = player_data[stat_metric].sum()
 
     if games_played < 2 and total_stat_volume < 40:
         return round(float(total_stat_volume / max(1, games_played)) * 0.35, 1)
 
-    base_proj = ((recent_avg * 0.50) + (season_avg * 0.50)) * 0.94
+    # 1. Base Weighted Average
+    base_proj = (recent_avg * 0.65) + (season_avg * 0.35)
 
+    # 2. NumPy Least-Squares Linear Regression Weighting
+    try:
+        clean_vals = player_data[stat_metric].dropna().values
+        if len(clean_vals) >= 3:
+            ml_pred = get_numpy_linear_prediction(tuple(clean_vals), recent_avg)
+            base_proj = (ml_pred * 0.45) + (base_proj * 0.55)
+    except Exception:
+        pass
+
+    # 3. Touchdown Regression Clamp
+    if "td" in stat_metric:
+        base_proj = (base_proj * 0.50) + (season_avg * 0.50)
+
+    # 4. Game Script Multipliers
     script_mult = 1.0
     if team_spread > 0:  # Underdog
-        if stat_metric in [
-            "passing_yards",
-            "passing_tds",
-            "attempts",
-            "receptions",
-            "receiving_yards",
-        ]:
-            script_mult += team_spread * 0.018
+        if stat_metric in ["passing_yards", "passing_tds", "attempts", "receptions", "receiving_yards", "targets"]:
+            script_mult += min(0.12, team_spread * 0.012)
         elif stat_metric in ["rushing_yards", "rushing_tds", "carries"]:
-            script_mult -= team_spread * 0.012
+            script_mult -= min(0.10, team_spread * 0.010)
     elif team_spread < 0:  # Favorite
         fav_mag = abs(team_spread)
-        if stat_metric in [
-            "rushing_yards",
-            "rushing_tds",
-            "carries",
-            "rush_attempts",
-        ]:
-            script_mult += fav_mag * 0.015
-        elif stat_metric in ["passing_yards", "attempts"]:
-            script_mult -= fav_mag * 0.010
+        if stat_metric in ["rushing_yards", "rushing_tds", "carries"]:
+            script_mult += min(0.12, fav_mag * 0.012)
+        elif stat_metric in ["passing_yards", "passing_tds", "attempts"]:
+            script_mult -= min(0.08, fav_mag * 0.008)
 
-    base_proj *= max(0.80, min(1.25, script_mult))
+    base_proj *= script_mult
 
+    # 5. Weather & Opponent Matchup Multipliers
     if full_df is not None and opponent_team:
-        player_team = (
-            player_data["team"].iloc[-1]
-            if "team" in player_data.columns
-            else "UNK"
-        )
+        player_team = player_data["team"].iloc[-1] if "team" in player_data.columns else "UNK"
         multiplier = get_matchup_environmental_multipliers(
             full_df, player_team, opponent_team, stat_metric, weather_desc
         )
         base_proj *= multiplier
+
+    # 6. Sanity Cap Guardrails
+    if stat_metric == "passing_yards":
+        base_proj = min(345.0, base_proj)
+    elif stat_metric == "receiving_yards":
+        base_proj = min(135.0, base_proj)
+    elif stat_metric == "rushing_yards":
+        base_proj = min(140.0, base_proj)
 
     return round(max(0.0, base_proj), 1)
 
@@ -355,7 +412,7 @@ st.title("🎯 A.L.P.H.A. 🎯")
 st.markdown(
     "<p style='color: #9ca3af; margin-top: -12px; font-size: 1.05rem;"
     " font-weight: 400;'>Advanced Line Pricing & Hedge Algorithm // Quantitative"
-    " Prop Research Terminal</p>",
+    " Prop Research Terminal (NumPy Regression Enhanced)</p>",
     unsafe_allow_html=True,
 )
 st.markdown("---")
@@ -371,76 +428,16 @@ tab_selection = st.sidebar.radio(
     [
         "Dashboard Home",
         "Game Analysis",
-        "Bet Calculator (Global Search)",
+        "🏟️ Team Projections & Lines",
         "🏈 Weekly Spread & O/U Matrix",
     ],
     label_visibility="collapsed",
 )
 
 st.sidebar.markdown("---")
-st.sidebar.markdown(
-    "<h3 style='color: #9ca3af; font-size: 0.75rem; letter-spacing: 0.05em;"
-    " text-transform: uppercase; margin-bottom: 5px;'>Engine Parameters</h3>",
-    unsafe_allow_html=True,
-)
 selected_season = st.sidebar.selectbox(
     "Active Data Season", [2026, 2025, 2024], index=0, label_visibility="collapsed"
 )
-
-
-@st.cache_data
-def load_weekly_data(season):
-    polars_df = nfl.load_player_stats([season])
-    return polars_df.to_pandas()
-
-
-@st.cache_data
-def load_schedule_data(season):
-    sched_df = nfl.load_schedules([season])
-    return (
-        sched_df.to_pandas()
-        if hasattr(sched_df, "to_pandas")
-        else pd.DataFrame(sched_df)
-    )
-
-
-TEAM_NAME_TO_ABBR = {
-    "Arizona Cardinals": "ARI",
-    "Atlanta Falcons": "ATL",
-    "Baltimore Ravens": "BAL",
-    "Buffalo Bills": "BUF",
-    "Carolina Panthers": "CAR",
-    "Chicago Bears": "CHI",
-    "Cincinnati Bengals": "CIN",
-    "Cleveland Browns": "CLE",
-    "Dallas Cowboys": "DAL",
-    "Denver Broncos": "DEN",
-    "Detroit Lions": "DET",
-    "Green Bay Packers": "GB",
-    "Houston Texans": "HOU",
-    "Indianapolis Colts": "IND",
-    "Jacksonville Jaguars": "JAX",
-    "Kansas City Chiefs": "KC",
-    "Los Angeles Chargers": "LAC",
-    "Los Angeles Rams": "LAR",
-    "Las Vegas Raiders": "LV",
-    "Miami Dolphins": "MIA",
-    "Minnesota Vikings": "MIN",
-    "New England Patriots": "NE",
-    "New Orleans Saints": "NO",
-    "New York Giants": "NYG",
-    "New York Jets": "NYJ",
-    "Philadelphia Eagles": "PHI",
-    "Pittsburgh Steelers": "PIT",
-    "Seattle Seahawks": "SEA",
-    "San Francisco 49ers": "SF",
-    "Tampa Bay Buccaneers": "TB",
-    "Tennessee Titans": "TEN",
-    "Washington Commanders": "WAS",
-    "Washington Redskins": "WAS",
-    "Washington Football Team": "WAS",
-}
-
 
 STAT_NAME_MAP = {
     "attempts": "Passing Attempts",
@@ -461,11 +458,7 @@ STAT_NAME_MAP = {
 
 
 def convert_to_cst(military_time_str):
-    if (
-        pd.isna(military_time_str)
-        or not isinstance(military_time_str, str)
-        or ":" not in military_time_str
-    ):
+    if pd.isna(military_time_str) or not isinstance(military_time_str, str) or ":" not in military_time_str:
         return military_time_str
     try:
         parts = military_time_str.split(":")
@@ -484,25 +477,8 @@ def convert_to_cst(military_time_str):
 def get_realistic_fallback_weather(home_team, stadium_name):
     stadium_lower = str(stadium_name).lower()
     team_str = str(home_team).upper()
-    if team_str in [
-        "BUF",
-        "GB",
-        "NE",
-        "CHI",
-        "NYG",
-        "NYJ",
-        "CLE",
-        "PIT",
-    ] or any(
-        x in stadium_lower
-        for x in [
-            "lambeau",
-            "highmark",
-            "metlife",
-            "firstenergy",
-            "acrisure",
-            "soldier",
-        ]
+    if team_str in ["BUF", "GB", "NE", "CHI", "NYG", "NYJ", "CLE", "PIT"] or any(
+        x in stadium_lower for x in ["lambeau", "highmark", "metlife", "firstenergy", "acrisure", "soldier"]
     ):
         options = [
             "🌧️ Heavy Rain Risk (75%, 21 mph)",
@@ -558,864 +534,168 @@ def fetch_live_weather(lat, lon, date_str, home_team, stadium_name):
         return get_realistic_fallback_weather(home_team, stadium_name)
 
 
+# --- TAB 1: DASHBOARD HOME ---
 if tab_selection == "Dashboard Home":
     st.subheader("System Status & Intelligence Feed")
-    st.success(
-        "🟢 Secure data pipeline active: Connected to official nflverse season"
-        " feed via `nflreadpy`."
-    )
-
     try:
         with st.spinner(f"Ingesting {selected_season} telemetry records..."):
             df = load_weekly_data(selected_season)
-
             col1, col2, col3, col4 = st.columns(4)
             col1.metric(label="Total Database Records", value=f"{len(df):,}")
-            col2.metric(
-                label="Active Players Tracked",
-                value=f"{df['player_id'].nunique():,}"
-                if "player_id" in df
-                else "N/A",
-            )
-            col3.metric(
-                label="NFL Teams Logged",
-                value=f"{df['team'].nunique()}" if "team" in df else "N/A",
-            )
+            col2.metric(label="Active Players Tracked", value=f"{df['player_id'].nunique():,}" if "player_id" in df else "N/A")
+            col3.metric(label="NFL Teams Logged", value=f"{df['team'].nunique()}" if "team" in df else "N/A")
             col4.metric(label="Total Metrics Available", value=f"{len(df.columns)}")
-
-            st.markdown("<br>", unsafe_allow_html=True)
-
-            view_mode = st.radio(
-                "Select Command Center View",
-                [
-                    "🎯 Top 5 Leaders Matrix",
-                    "🛡️ Unit Efficiency (Off/Def)",
-                    "📅 Upcoming Week Slate",
-                ],
-                horizontal=True,
-                label_visibility="collapsed",
-            )
-
-            st.markdown("---")
-            name_col = (
-                "player_display_name"
-                if "player_display_name" in df.columns
-                else ("player_name" if "player_name" in df.columns else None)
-            )
-
-            if "Top 5 Leaders Matrix" in view_mode:
-                st.markdown("### 🎯 Top 5 Major Stat Leaders")
-                st.markdown(
-                    "<p style='color: #9ca3af;'>Top performers across Passing Yards,"
-                    " Rushing Yards, Receiving Yards, and Total Touchdowns.</p>",
-                    unsafe_allow_html=True,
-                )
-
-                if name_col:
-                    col_p, col_r = st.columns(2)
-                    with col_p:
-                        st.markdown("#### 🏈 Top 5 Passing Yards")
-                        if "passing_yards" in df.columns:
-                            pass_top = df.groupby([name_col, "team"], as_index=False)[
-                                "passing_yards"
-                            ].sum()
-                            pass_top = pass_top.sort_values(
-                                by="passing_yards", ascending=False
-                            ).head(5)
-                            pass_top.columns = ["Player Name", "Team", "Passing Yards"]
-                            st.dataframe(pass_top, use_container_width=True, hide_index=True)
-                        else:
-                            st.info("Passing yards unavailable.")
-
-                        st.markdown("#### 🏃 Top 5 Rushing Yards")
-                        if "rushing_yards" in df.columns:
-                            rush_top = df.groupby([name_col, "team"], as_index=False)[
-                                "rushing_yards"
-                            ].sum()
-                            rush_top = rush_top.sort_values(
-                                by="rushing_yards", ascending=False
-                            ).head(5)
-                            rush_top.columns = ["Player Name", "Team", "Rushing Yards"]
-                            st.dataframe(rush_top, use_container_width=True, hide_index=True)
-                        else:
-                            st.info("Rushing yards unavailable.")
-
-                    with col_r:
-                        st.markdown("#### 🤲 Top 5 Receiving Yards")
-                        if "receiving_yards" in df.columns:
-                            rec_top = df.groupby([name_col, "team"], as_index=False)[
-                                "receiving_yards"
-                            ].sum()
-                            rec_top = rec_top.sort_values(
-                                by="receiving_yards", ascending=False
-                            ).head(5)
-                            rec_top.columns = ["Player Name", "Team", "Receiving Yards"]
-                            st.dataframe(rec_top, use_container_width=True, hide_index=True)
-                        else:
-                            st.info("Receiving yards unavailable.")
-
-                        st.markdown("#### ⚡ Top 5 Total Touchdowns")
-                        td_cols = [
-                            c
-                            for c in ["passing_tds", "rushing_tds", "receiving_tds"]
-                            if c in df.columns
-                        ]
-                        if td_cols:
-                            df["total_tds"] = df[td_cols].sum(axis=1)
-                            td_top = df.groupby([name_col, "team"], as_index=False)[
-                                "total_tds"
-                            ].sum()
-                            td_top = td_top.sort_values(
-                                by="total_tds", ascending=False
-                            ).head(5)
-                            td_top.columns = ["Player Name", "Team", "Total Touchdowns"]
-                            st.dataframe(td_top, use_container_width=True, hide_index=True)
-                        else:
-                            st.info("Touchdown data unavailable.")
-                else:
-                    st.warning("Player name identifiers unavailable.")
-
-            elif "Unit Efficiency" in view_mode:
-                st.markdown(
-                    "### 🛡️ Unit Efficiency & Performance (Offense / Defense)"
-                )
-                st.markdown(
-                    "<p style='color: #9ca3af;'>Team-level offensive output and"
-                    " defensive containment expected points added (EPA).</p>",
-                    unsafe_allow_html=True,
-                )
-
-                if "team" in df.columns:
-                    col_off, col_def = st.columns(2)
-                    with col_off:
-                        st.markdown("#### Top Offensive Units (Net EPA)")
-                        epa_cols = [
-                            c
-                            for c in ["passing_epa", "rushing_epa", "receiving_epa"]
-                            if c in df.columns
-                        ]
-                        if epa_cols:
-                            df["total_epa"] = df[epa_cols].sum(axis=1)
-                            off_summary = (
-                                df.groupby("team", as_index=False)["total_epa"]
-                                .mean()
-                                .sort_values(by="total_epa", ascending=False)
-                            )
-                            off_summary.columns = ["Team", "Net Offensive EPA / Game"]
-                            st.dataframe(
-                                off_summary.head(10), use_container_width=True, hide_index=True
-                            )
-                        else:
-                            st.info("Offensive EPA metrics unavailable.")
-                    with col_def:
-                        st.markdown("#### Defensive Units (Allowed EPA)")
-                        if epa_cols:
-                            def_summary = (
-                                df.groupby("team", as_index=False)["total_epa"]
-                                .mean()
-                                .sort_values(by="total_epa", ascending=True)
-                            )
-                            def_summary.columns = ["Team", "Net Defensive EPA Allowed"]
-                            st.dataframe(
-                                def_summary.head(10), use_container_width=True, hide_index=True
-                            )
-                        else:
-                            st.info("Defensive metrics feed ready for ingestion.")
-                else:
-                    st.warning("Team identifiers unavailable.")
-
-            elif "Upcoming Week Slate" in view_mode:
-                st.markdown("### 📅 NFL Game Schedule & Live Weather Predictors")
-                st.markdown(
-                    "<p style='color: #9ca3af;'>Matchups, local CST kickoff times, and"
-                    " real-time forecasted weather conditions.</p>",
-                    unsafe_allow_html=True,
-                )
-
-                try:
-                    sched_df = load_schedule_data(selected_season)
-                    if not sched_df.empty and "week" in sched_df.columns:
-                        available_weeks = sorted(sched_df["week"].dropna().unique())
-                        selected_week = st.selectbox(
-                            "Select Week Filter",
-                            available_weeks,
-                            index=2 if len(available_weeks) > 2 else 0,
-                        )
-
-                        week_sched = sched_df[sched_df["week"] == selected_week].copy()
-                        if "gametime" in week_sched.columns:
-                            week_sched["gametime"] = week_sched["gametime"].apply(
-                                convert_to_cst
-                            )
-
-                        def evaluate_weather(row):
-                            roof = str(row.get("roof", "")).lower()
-                            if "dome" in roof or "closed" in roof:
-                                return "🏟 Domed (Controlled)"
-                            return fetch_live_weather(
-                                row.get("stadium_lat"),
-                                row.get("stadium_long"),
-                                row.get("gameday"),
-                                row.get("home_team"),
-                                row.get("stadium"),
-                            )
-
-                        week_sched["Weather / Environment"] = week_sched.apply(
-                            evaluate_weather, axis=1
-                        )
-                        display_cols = [
-                            c
-                            for c in [
-                                "gameday",
-                                "weekday",
-                                "away_team",
-                                "home_team",
-                                "gametime",
-                                "Weather / Environment",
-                                "stadium",
-                            ]
-                            if c in week_sched.columns
-                        ]
-                        if display_cols:
-                            render_sched = week_sched[display_cols].copy()
-                            render_sched.columns = [
-                                c.replace("_", " ").title() for c in render_sched.columns
-                            ]
-                            st.dataframe(
-                                render_sched, use_container_width=True, height=450, hide_index=True
-                            )
-                        else:
-                            st.dataframe(
-                                week_sched, use_container_width=True, height=450, hide_index=True
-                            )
-                    else:
-                        st.warning("Schedule feed structure missing week columns.")
-                except Exception as ex:
-                    st.error(f"Could not render schedule feed: {ex}")
-
     except Exception as e:
         st.error(f"Error loading pipeline data: {e}")
 
+# --- TAB 2: GAME ANALYSIS ---
 elif tab_selection == "Game Analysis":
-    st.subheader(
-        "🏈 Comprehensive Game Analysis & Major Starters Projections (QB, HB,"
-        " WR1-3, TE)"
-    )
-    st.markdown(
-        "<p style='color: #9ca3af;'>Inspect matchup details, weather forecasts,"
-        " and automatically generated model stat projections for every major"
-        " skill player (including rushing/passing attempts).</p>",
-        unsafe_allow_html=True,
-    )
-
+    st.subheader("🏈 Comprehensive Game Analysis & Matchups")
     try:
         sched_df = load_schedule_data(selected_season)
         df = load_weekly_data(selected_season)
-        name_col = (
-            "player_display_name"
-            if "player_display_name" in df.columns
-            else ("player_name" if "player_name" in df.columns else None)
-        )
+        inj_df = load_injury_data(selected_season)
+        name_col = "player_display_name" if "player_display_name" in df.columns else ("player_name" if "player_name" in df.columns else None)
 
         if not sched_df.empty and "week" in sched_df.columns:
             available_weeks = sorted(sched_df["week"].dropna().unique())
-            sel_week = st.selectbox(
-                "Select Slate Week",
-                available_weeks,
-                index=2 if len(available_weeks) > 2 else 0,
-                key="ga_week",
-            )
-
+            sel_week = st.selectbox("Select Target Slate Week", available_weeks, index=2 if len(available_weeks) > 2 else 0)
             week_games = sched_df[sched_df["week"] == sel_week].copy()
+
             if not week_games.empty:
-                matchup_options = []
-                matchup_mapping = {}
-                for _, g in week_games.iterrows():
-                    away = g.get("away_team", "AWAY")
-                    home = g.get("home_team", "HOME")
-                    label = f"{away} @ {home} (Week {sel_week})"
-                    matchup_options.append(label)
-                    matchup_mapping[label] = g
+                matchup_options = [f"{g.get('away_team', 'AWAY')} @ {g.get('home_team', 'HOME')} (Week {sel_week})" for _, g in week_games.iterrows()]
+                selected_matchup_label = st.selectbox("Select Game Matchup", matchup_options)
+                game_row = week_games.iloc[matchup_options.index(selected_matchup_label)]
 
-                selected_matchup_label = st.selectbox(
-                    "Select Game Matchup", matchup_options
-                )
-                game_row = matchup_mapping[selected_matchup_label]
-
-                away_team = game_row.get("away_team", "AWAY")
-                home_team = game_row.get("home_team", "HOME")
-                stadium = game_row.get("stadium", "Stadium")
+                away_team, home_team = game_row.get("away_team", "AWAY"), game_row.get("home_team", "HOME")
+                stadium, roof, gameday = game_row.get("stadium", "Stadium"), game_row.get("roof", "outdoors"), game_row.get("gameday", "TBD")
                 gametime = convert_to_cst(game_row.get("gametime", "1:00 PM"))
-                gameday = game_row.get("gameday", "TBD")
-                roof = game_row.get("roof", "outdoors")
+
+                st.markdown(f"<h2 style='text-align: center;'>{away_team} at {home_team} (Week {sel_week})</h2>", unsafe_allow_html=True)
+                weather_str = "🏟 Domed (Controlled)" if "dome" in str(roof).lower() or "closed" in str(roof).lower() else fetch_live_weather(game_row.get("stadium_lat"), game_row.get("stadium_long"), gameday, home_team, stadium)
+                
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Kickoff", f"{gameday} @ {gametime}")
+                c2.metric("Venue", stadium)
+                c3.metric("Conditions", weather_str)
 
                 st.markdown("---")
-                st.markdown(
-                    f"<h2 style='text-align: center; margin-top: 5px;'>{away_team} at {home_team}</h2>",
-                    unsafe_allow_html=True,
-                )
+                st.markdown(f"#### 📊 Active Injury-Adjusted Starters Matrix")
+                
+                game_players_df = df[df["team"].isin([away_team, home_team])].copy()
+                if not game_players_df.empty and name_col:
+                    proj_spread = calculate_data_driven_spread(df, away_team, home_team)
+                    away_spread, home_spread = -proj_spread, proj_spread
 
-                bc1, bc2, bc3 = st.columns(3)
-                with bc1:
-                    st.markdown(
-                        f"""
-                        <div class="custom-metric-card">
-                            <div class="custom-metric-label">Kickoff Time & Date</div>
-                            <div class="custom-metric-value" style="font-size: 1.15rem !important;">{gameday} @ {gametime}</div>
-                        </div>
-                    """,
-                        unsafe_allow_html=True,
-                    )
-                with bc2:
-                    st.markdown(
-                        f"""
-                        <div class="custom-metric-card">
-                            <div class="custom-metric-label">Venue & Environment</div>
-                            <div class="custom-metric-value" style="font-size: 1.15rem !important;">{stadium}</div>
-                        </div>
-                    """,
-                        unsafe_allow_html=True,
-                    )
-                with bc3:
-                    weather_str = (
-                        "🏟 Domed (Controlled)"
-                        if "dome" in str(roof).lower() or "closed" in str(roof).lower()
-                        else fetch_live_weather(
-                            game_row.get("stadium_lat"),
-                            game_row.get("stadium_long"),
-                            gameday,
-                            home_team,
-                            stadium,
-                        )
-                    )
-                    st.markdown(
-                        f"""
-                        <div class="custom-metric-card">
-                            <div class="custom-metric-label">Forecast / Conditions</div>
-                            <div class="custom-metric-value" style="font-size: 1.15rem !important;">{weather_str}</div>
-                        </div>
-                    """,
-                        unsafe_allow_html=True,
-                    )
-
-                st.markdown("<br>", unsafe_allow_html=True)
-                st.markdown(
-                    "#### 📊 Major Starters Model Projections (Passing/Rushing Yards & Attempts)"
-                )
-                st.markdown(
-                    "<p style='color: #9ca3af;'>Incorporating game script leverage"
-                    " (underdogs pass more, favorites run more) alongside EPA and weather.</p>",
-                    unsafe_allow_html=True,
-                )
-
-                if not df.empty and name_col:
-                    teams_in_game = [away_team, home_team]
-                    game_players_df = df[df["team"].isin(teams_in_game)].copy()
-
-                    if not game_players_df.empty:
-                        proj_spread = calculate_data_driven_spread(df, away_team, home_team)
-                        away_team_spread = -proj_spread
-                        home_team_spread = proj_spread
-
-                        def get_team_starters(t_df, t_abbr):
-                            starters_list = []
-                            qb_df = t_df[t_df["position"] == "QB"]
-                            if not qb_df.empty:
-                                qb_grouped = (
-                                    qb_df.groupby([name_col], as_index=False)[
-                                        "passing_yards"
-                                    ]
-                                    .sum()
-                                    .sort_values(by="passing_yards", ascending=False)
-                                )
-                                if not qb_grouped.empty:
-                                    starters_list.append((qb_grouped.iloc[0][name_col], "QB"))
-
-                            rb_df = t_df[t_df["position"] == "RB"]
-                            if not rb_df.empty:
-                                rb_grouped = (
-                                    rb_df.groupby([name_col], as_index=False)["rushing_yards"]
-                                    .sum()
-                                    .sort_values(by="rushing_yards", ascending=False)
-                                )
-                                for _, rrow in rb_grouped.head(2).iterrows():
-                                    starters_list.append((rrow[name_col], "HB"))
-
-                            wr_df = t_df[t_df["position"] == "WR"]
-                            if not wr_df.empty:
-                                wr_grouped = (
-                                    wr_df.groupby([name_col], as_index=False)[
-                                        "receiving_yards"
-                                    ]
-                                    .sum()
-                                    .sort_values(by="receiving_yards", ascending=False)
-                                )
-                                for w_idx, wrow in wr_grouped.head(3).iterrows():
-                                    wr_label = (
-                                        f"WR{len([x for x in starters_list if 'WR' in x[1]]) + 1}"
-                                    )
-                                    starters_list.append((wrow[name_col], wr_label))
-
-                            te_df = t_df[t_df["position"] == "TE"]
-                            if not te_df.empty:
-                                te_grouped = (
-                                    te_df.groupby([name_col], as_index=False)[
-                                        "receiving_yards"
-                                    ]
-                                    .sum()
-                                    .sort_values(by="receiving_yards", ascending=False)
-                                )
-                                if not te_grouped.empty:
-                                    starters_list.append((te_grouped.iloc[0][name_col], "TE"))
-
-                            return starters_list
-
-                        away_starters = get_team_starters(
-                            game_players_df[game_players_df["team"] == away_team], away_team
-                        )
-                        home_starters = get_team_starters(
-                            game_players_df[game_players_df["team"] == home_team], home_team
-                        )
-
-                        all_matchup_starters = [(s[0], s[1], away_team) for s in away_starters] + [
-                            (s[0], s[1], home_team) for s in home_starters
-                        ]
-
-                        starter_rows = []
-                        for p_name, p_role, p_team in all_matchup_starters:
-                            p_full_df = game_players_df[
-                                game_players_df[name_col] == p_name
-                            ].sort_values(by="week")
+                    def build_starters_table(team_abbr, team_spread_val, opp_abbr):
+                        t_df = game_players_df[game_players_df["team"] == team_abbr]
+                        starters = get_active_team_starters(t_df, name_col, inj_df, sel_week)
+                        rows = []
+                        for p_name, p_role in starters:
+                            p_full_df = t_df[t_df[name_col] == p_name].sort_values(by="week")
                             if p_full_df.empty:
                                 continue
-
-                            t_spread = (
-                                away_team_spread if p_team == away_team else home_team_spread
-                            )
-
-                            if p_role == "QB":
-                                season_avg_yds = (
-                                    p_full_df["passing_yards"].mean()
-                                    if "passing_yards" in p_full_df.columns
-                                    else 0
-                                )
-                                recent_avg_yds = (
-                                    p_full_df["passing_yards"].tail(3).mean()
-                                    if "passing_yards" in p_full_df.columns
-                                    else season_avg_yds
-                                )
-                                proj_yds = generate_unified_projection(
-                                    p_full_df,
-                                    "passing_yards",
-                                    season_avg_yds,
-                                    recent_avg_yds,
-                                    full_df=df,
-                                    opponent_team=(
-                                        home_team if p_team == away_team else away_team
-                                    ),
-                                    weather_desc=weather_str,
-                                    team_spread=t_spread,
-                                )
-
-                                season_avg_att = (
-                                    p_full_df["attempts"].mean()
-                                    if "attempts" in p_full_df.columns
-                                    else 0
-                                )
-                                recent_avg_att = (
-                                    p_full_df["attempts"].tail(3).mean()
-                                    if "attempts" in p_full_df.columns
-                                    else season_avg_att
-                                )
-                                proj_att = generate_unified_projection(
-                                    p_full_df,
-                                    "attempts",
-                                    season_avg_att,
-                                    recent_avg_att,
-                                    full_df=df,
-                                    opponent_team=(
-                                        home_team if p_team == away_team else away_team
-                                    ),
-                                    weather_desc=weather_str,
-                                    team_spread=t_spread,
-                                )
-
-                                proj_str = f"{proj_yds} Pass Yds | {proj_att} Pass Att"
-
-                            elif p_role in ["HB", "RB"]:
-                                season_avg_yds = (
-                                    p_full_df["rushing_yards"].mean()
-                                    if "rushing_yards" in p_full_df.columns
-                                    else 0
-                                )
-                                recent_avg_yds = (
-                                    p_full_df["rushing_yards"].tail(3).mean()
-                                    if "rushing_yards" in p_full_df.columns
-                                    else season_avg_yds
-                                )
-                                proj_yds = generate_unified_projection(
-                                    p_full_df,
-                                    "rushing_yards",
-                                    season_avg_yds,
-                                    recent_avg_yds,
-                                    full_df=df,
-                                    opponent_team=(
-                                        home_team if p_team == away_team else away_team
-                                    ),
-                                    weather_desc=weather_str,
-                                    team_spread=t_spread,
-                                )
-
-                                season_avg_car = (
-                                    p_full_df["carries"].mean()
-                                    if "carries" in p_full_df.columns
-                                    else 0
-                                )
-                                recent_avg_car = (
-                                    p_full_df["carries"].tail(3).mean()
-                                    if "carries" in p_full_df.columns
-                                    else season_avg_car
-                                )
-                                proj_car = generate_unified_projection(
-                                    p_full_df,
-                                    "carries",
-                                    season_avg_car,
-                                    recent_avg_car,
-                                    full_df=df,
-                                    opponent_team=(
-                                        home_team if p_team == away_team else away_team
-                                    ),
-                                    weather_desc=weather_str,
-                                    team_spread=t_spread,
-                                )
-
-                                proj_str = f"{proj_yds} Rush Yds | {proj_car} Carries"
-
-                            else:
-                                season_avg_yds = (
-                                    p_full_df["receiving_yards"].mean()
-                                    if "receiving_yards" in p_full_df.columns
-                                    else 0
-                                )
-                                recent_avg_yds = (
-                                    p_full_df["receiving_yards"].tail(3).mean()
-                                    if "receiving_yards" in p_full_df.columns
-                                    else season_avg_yds
-                                )
-                                proj_yds = generate_unified_projection(
-                                    p_full_df,
-                                    "receiving_yards",
-                                    season_avg_yds,
-                                    recent_avg_yds,
-                                    full_df=df,
-                                    opponent_team=(
-                                        home_team if p_team == away_team else away_team
-                                    ),
-                                    weather_desc=weather_str,
-                                    team_spread=t_spread,
-                                )
-                                proj_str = f"{proj_yds} Rec Yds"
-
-                            starter_rows.append({
-                                "Player": p_name,
-                                "Team": p_team,
-                                "Role": p_role,
-                                "Projection": proj_str,
+                            def get_p(m):
+                                if m not in p_full_df.columns: return 0.0
+                                return generate_unified_projection(p_full_df, m, p_full_df[m].mean(), p_full_df[m].tail(3).mean(), full_df=df, opponent_team=opp_abbr, weather_desc=weather_str, team_spread=team_spread_val)
+                            rows.append({
+                                "Player": p_name, "Team": team_abbr, "Position": p_role,
+                                "Pass Yds": get_p("passing_yards"), "Pass TDs": get_p("passing_tds"),
+                                "Rush Yds": get_p("rushing_yards"), "Carries": get_p("carries"),
+                                "Rec Yds": get_p("receiving_yards"), "Receptions": get_p("receptions"), "Targets": get_p("targets")
                             })
+                        return pd.DataFrame(rows)
 
-                        starters_df = pd.DataFrame(starter_rows)
-                        if not starters_df.empty:
-                            st.dataframe(
-                                starters_df.rename(columns={
-                                    "Player": "Player Name",
-                                    "Team": "Team",
-                                    "Role": "Position / Role",
-                                    "Projection": "A.L.P.H.A. Model Stat Projections",
-                                }),
-                                use_container_width=True,
-                                hide_index=True,
-                            )
-                        else:
-                            st.warning("Could not isolate starters for this matchup.")
+                    away_table = build_starters_table(away_team, away_spread, home_team)
+                    home_table = build_starters_table(home_team, home_spread, away_team)
+                    combined_table = pd.concat([away_table, home_table], ignore_index=True)
+                    if not combined_table.empty:
+                        st.dataframe(combined_table, use_container_width=True, hide_index=True)
                     else:
-                        st.warning("Player telemetry unavailable for this matchup.")
-                else:
-                    st.warning("Player dataset unavailable.")
-            else:
-                st.warning("No games found for selected week.")
+                        st.info("No active starter data available.")
         else:
             st.warning("Schedule dataset unavailable.")
     except Exception as e:
         st.error(f"Error loading Game Analysis: {e}")
 
-elif tab_selection == "Bet Calculator (Global Search)":
-    st.subheader(
-        "⚡ Global Player Search, Custom Line Input & Edge Finder Terminal"
-    )
-    st.markdown(
-        "<p style='color: #9ca3af;'>Search across any active NFL player in the"
-        " database, set custom sportsbook lines, and calculate exact model edge"
-        " and win probability.</p>",
-        unsafe_allow_html=True,
-    )
-
+# --- TAB 3: TEAM PROJECTIONS & LINES ---
+elif tab_selection == "🏟️ Team Projections & Lines":
+    st.subheader("🏟️ Team-Centric Projections & Available Lines")
+    st.markdown("<p style='color: #9ca3af;'>Select a Week and Team to view all healthy eligible starters and algorithmic projections.</p>", unsafe_allow_html=True)
+    
     try:
-        df = load_weekly_data(selected_season)
         sched_df = load_schedule_data(selected_season)
-        name_col = (
-            "player_display_name"
-            if "player_display_name" in df.columns
-            else ("player_name" if "player_name" in df.columns else None)
-        )
+        df = load_weekly_data(selected_season)
+        inj_df = load_injury_data(selected_season)
+        name_col = "player_display_name" if "player_display_name" in df.columns else ("player_name" if "player_name" in df.columns else None)
 
-        if not df.empty and name_col:
-            all_players_global = sorted(df[name_col].dropna().unique())
+        if not sched_df.empty and not df.empty and name_col:
+            available_weeks = sorted(sched_df["week"].dropna().unique())
+            c_w, c_t = st.columns(2)
+            with c_w:
+                sel_w = st.selectbox("Select Week", available_weeks, index=2 if len(available_weeks) > 2 else 0, key="team_proj_week")
+            with c_t:
+                teams_list = sorted(df["team"].dropna().unique())
+                sel_team = st.selectbox("Select Team", teams_list, key="team_proj_team")
 
-            col_s1, col_s2 = st.columns([2, 1])
-            with col_s1:
-                sel_player = st.selectbox(
-                    "Global Player Search (Select or Type Any Player)",
-                    all_players_global,
-                )
-            with col_s2:
-                stat_metric = st.selectbox(
-                    "Target Stat Prop",
-                    [
-                        "passing_yards",
-                        "attempts",
-                        "rushing_yards",
-                        "carries",
-                        "receiving_yards",
-                        "receptions",
-                        "fantasy_points_ppr",
-                    ],
-                    format_func=lambda x: STAT_NAME_MAP.get(
-                        x, x.replace("_", " ").title()
-                    ),
-                )
+            match_row = sched_df[(sched_df["week"] == sel_w) & ((sched_df["home_team"] == sel_team) | (sched_df["away_team"] == sel_team))]
+            opp_team = "UNK"
+            weather_desc = "🌤 Clear Outdoor (70°F, 8 mph)"
+            team_spread = 0.0
 
-            player_data = df[df[name_col] == sel_player].sort_values(by=["week"])
-
-            if not player_data.empty and stat_metric in player_data.columns:
-                last_played_week = int(player_data["week"].max())
-                upcoming_week = last_played_week + 1 if last_played_week < 18 else 18
-                player_team = (
-                    player_data["team"].iloc[-1]
-                    if "team" in player_data.columns
-                    else "UNK"
-                )
-                player_pos = (
-                    player_data["position"].iloc[0]
-                    if "position" in player_data.columns
-                    else "QB"
-                )
-
-                recent_avg = player_data[stat_metric].tail(4).mean()
-                season_avg = player_data[stat_metric].mean()
-
-                game_sched_row = None
-                if not sched_df.empty:
-                    match_rows = sched_df[
-                        (sched_df["week"] == upcoming_week)
-                        & (
-                            (sched_df["home_team"] == player_team)
-                            | (sched_df["away_team"] == player_team)
-                        )
-                    ]
-                    if not match_rows.empty:
-                        game_sched_row = match_rows.iloc[0]
-
-                opp_team = "UNK"
-                weather_desc = "🌤 Clear Outdoor (70°F, 8 mph)"
-                team_spread_val = 0.0
-                if game_sched_row is not None:
-                    h_t = game_sched_row.get("home_team")
-                    a_t = game_sched_row.get("away_team")
-                    opp_team = a_t if player_team == h_t else h_t
-                    proj_spread = calculate_data_driven_spread(df, a_t, h_t)
-                    team_spread_val = proj_spread if player_team == h_t else -proj_spread
-                    roof = str(game_sched_row.get("roof", "")).lower()
-                    if "dome" in roof or "closed" in roof:
-                        weather_desc = "🏟 Domed (Controlled)"
-                    else:
-                        weather_desc = fetch_live_weather(
-                            game_sched_row.get("stadium_lat"),
-                            game_sched_row.get("stadium_long"),
-                            game_sched_row.get("gameday"),
-                            h_t,
-                            game_sched_row.get("stadium"),
-                        )
-
-                model_projection = generate_unified_projection(
-                    player_data,
-                    stat_metric,
-                    season_avg,
-                    recent_avg,
-                    full_df=df,
-                    opponent_team=opp_team,
-                    weather_desc=weather_desc,
-                    team_spread=team_spread_val,
-                )
-
-                st.markdown("---")
-                info_c1, info_c2, info_c3, info_c4 = st.columns(4)
-                info_c1.metric(label="Player Position", value=player_pos)
-                info_c2.metric(label="Active Team", value=player_team)
-                info_c3.metric(label="Season Average", value=f"{round(season_avg, 1)}")
-                info_c4.metric(
-                    label="Model Projection", value=f"{model_projection}"
-                )
-
-                st.markdown("<br>", unsafe_allow_html=True)
-                b_col1, b_col2, b_col3 = st.columns(3)
-                with b_col1:
-                    market_line = st.number_input(
-                        "Custom Sportsbook Prop Line",
-                        value=float(round(model_projection * 0.90, 1)),
-                        step=0.5,
-                    )
-                with b_col2:
-                    bet_side = st.selectbox("Bet Direction", ["OVER", "UNDER"])
-                with b_col3:
-                    american_odds = st.number_input(
-                        "American Odds (e.g., -110)", value=-110, step=5
-                    )
-
-                implied_prob = calculate_implied_probability(int(american_odds))
-
-                if len(player_data) >= 3 and stat_metric in player_data.columns:
-                    chosen_std = float(player_data[stat_metric].tail(8).std())
-                    if pd.isna(chosen_std) or chosen_std <= 2.0:
-                        chosen_std = 18.0
+            if not match_row.empty:
+                r = match_row.iloc[0]
+                h_t, a_t = r.get("home_team"), r.get("away_team")
+                opp_team = a_t if sel_team == h_t else h_t
+                proj_spread = calculate_data_driven_spread(df, a_t, h_t)
+                team_spread = proj_spread if sel_team == h_t else -proj_spread
+                roof = str(r.get("roof", "")).lower()
+                if "dome" in roof or "closed" in roof:
+                    weather_desc = "🏟 Domed (Controlled)"
                 else:
-                    chosen_std = 22.0
+                    weather_desc = fetch_live_weather(r.get("stadium_lat"), r.get("stadium_long"), r.get("gameday"), h_t, r.get("stadium"))
 
-                over_prob = calculate_normal_cdf_probability(
-                    market_line, model_projection, chosen_std
-                )
-                under_prob = 1.0 - over_prob
+            st.markdown(f"### 📋 {sel_team} Active Injury-Checked Roster Projections (vs. {opp_team}) // Week {sel_w}")
+            team_df = df[df["team"] == sel_team]
+            starters = get_active_team_starters(team_df, name_col, inj_df, sel_w)
 
-                if bet_side == "OVER":
-                    model_win_prob = over_prob
-                else:
-                    model_win_prob = under_prob
+            team_rows = []
+            for p_name, p_role in starters:
+                p_full = team_df[team_df[name_col] == p_name].sort_values(by="week")
+                if p_full.empty: continue
+                
+                def get_metric_proj(m):
+                    if m not in p_full.columns: return 0.0
+                    return generate_unified_projection(p_full, m, p_full[m].mean(), p_full[m].tail(3).mean(), full_df=df, opponent_team=opp_team, weather_desc=weather_desc, team_spread=team_spread)
 
-                if over_prob >= 0.55:
-                    rec_text = "🎯 TAKE THE OVER"
-                    rec_color = "#10b981"
-                elif over_prob <= 0.45:
-                    rec_text = "🎯 TAKE THE UNDER"
-                    rec_color = "#10b981"
-                else:
-                    rec_text = "🛡 PASS (No Edge)"
-                    rec_color = "#9ca3af"
+                team_rows.append({
+                    "Player Name": p_name,
+                    "Position": p_role,
+                    "Pass Yds": get_metric_proj("passing_yards"),
+                    "Pass TDs": get_metric_proj("passing_tds"),
+                    "Rush Yds": get_metric_proj("rushing_yards"),
+                    "Carries": get_metric_proj("carries"),
+                    "Rush TDs": get_metric_proj("rushing_tds"),
+                    "Rec Yds": get_metric_proj("receiving_yards"),
+                    "Receptions": get_metric_proj("receptions"),
+                    "Targets": get_metric_proj("targets"),
+                    "Rec TDs": get_metric_proj("receiving_tds"),
+                })
 
-                st.markdown("---")
-
-                st.markdown(
-                    f"""
-                    <div style="background: #111620; border: 1px solid #1f2937; padding: 16px; border-radius: 12px; margin-bottom: 20px; text-align: center;">
-                        <span style="color: #9ca3af; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600;">Model Recommendation:</span><br>
-                        <span style="color: {rec_color}; font-size: 1.5rem; font-weight: 800;">{rec_text}</span>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-                col_res1, col_res2, col_res3 = st.columns(3)
-                with col_res1:
-                    st.metric(
-                        f"Selected Side ({bet_side}) Win Prob",
-                        f"{round(model_win_prob * 100, 1)}%",
-                    )
-                with col_res2:
-                    st.metric("Implied Probability", f"{round(implied_prob * 100, 2)}%")
-                with col_res3:
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    if st.button("➕ Add to Parlay Slip", use_container_width=True):
-                        leg_item = {
-                            "player": sel_player,
-                            "team": player_team,
-                            "prop": STAT_NAME_MAP.get(stat_metric, stat_metric),
-                            "side": bet_side,
-                            "line": market_line,
-                            "odds": int(american_odds),
-                            "win_prob": model_win_prob,
-                        }
-                        st.session_state.parlay_legs.append(leg_item)
-                        st.success(
-                            f"Added {sel_player} ({bet_side} {market_line}"
-                            f" {STAT_NAME_MAP.get(stat_metric, stat_metric)}) to your"
-                            " Parlay Slip!"
-                        )
-
-                st.markdown("---")
-                st.markdown("### 🎟️ Active Parlay Slip & Combined Probability")
-                if st.session_state.parlay_legs:
-                    parlay_df = pd.DataFrame(st.session_state.parlay_legs)
-                    st.dataframe(
-                        parlay_df[
-                            ["player", "team", "prop", "side", "line", "odds", "win_prob"]
-                        ].rename(columns={
-                            "player": "Player",
-                            "team": "Team",
-                            "prop": "Prop",
-                            "side": "Side",
-                            "line": "Line",
-                            "odds": "Odds",
-                            "win_prob": "Win Prob",
-                        }),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-                    combined_prob = 1.0
-                    combined_decimal = 1.0
-                    for leg in st.session_state.parlay_legs:
-                        combined_prob *= leg["win_prob"]
-                        combined_decimal *= american_to_decimal(leg["odds"])
-
-                    combined_american = decimal_to_american(combined_decimal)
-
-                    p_col1, p_col2, p_col3 = st.columns(3)
-                    with p_col1:
-                        st.metric(
-                            "Combined Parlay Win Probability",
-                            f"{round(combined_prob * 100, 2)}%",
-                        )
-                    with p_col2:
-                        st.metric(
-                            "Combined Parlay Odds",
-                            f"{combined_american:+d}"
-                            if combined_american != 0
-                            else "EVEN",
-                        )
-                    with p_col3:
-                        st.markdown("<br>", unsafe_allow_html=True)
-                        if st.button("🗑️ Clear Parlay Slip"):
-                            st.session_state.parlay_legs = []
-                            st.rerun()
-                else:
-                    st.info(
-                        "Your parlay slip is currently empty. Click 'Add to Parlay Slip'"
-                        " above to combine props!"
-                    )
+            team_proj_df = pd.DataFrame(team_rows)
+            if not team_proj_df.empty:
+                st.dataframe(team_proj_df, use_container_width=True, hide_index=True)
             else:
-                st.info("Insufficient game logs for selected player/stat.")
+                st.info("No active eligible player stats found for this team/week combination.")
         else:
-            st.warning("Player data unavailable for calculation.")
+            st.warning("Data feeds unavailable.")
     except Exception as e:
-        st.error(f"Global Search Calculator Error: {e}")
+        st.error(f"Team Projections Error: {e}")
 
+# --- TAB 4: WEEKLY SPREAD & O/U MATRIX ---
 elif tab_selection == "🏈 Weekly Spread & O/U Matrix":
-    st.subheader(
-        "🏈 Weekly Game Spread & O/U Projections Matrix"
-    )
-    st.markdown(
-        "<p style='color: #9ca3af;'>Algorithmic model-projected point spreads and"
-        " total over/under outputs for every game on the slate.</p>",
-        unsafe_allow_html=True,
-    )
+    st.subheader("🏈 Weekly Game Spread & O/U Projections Matrix")
+    st.markdown("<p style='color: #9ca3af;'>Algorithmic model-projected point spreads, win probabilities, and pace-adjusted Over/Under point totals.</p>", unsafe_allow_html=True)
 
     try:
         sched_df = load_schedule_data(selected_season)
@@ -1423,119 +703,49 @@ elif tab_selection == "🏈 Weekly Spread & O/U Matrix":
 
         if not sched_df.empty and "week" in sched_df.columns:
             available_weeks = sorted(sched_df["week"].dropna().unique())
-            selected_week = st.selectbox(
-                "Select Slate Week",
-                available_weeks,
-                index=2 if len(available_weeks) > 2 else 0,
-            )
-
+            selected_week = st.selectbox("Select Slate Week", available_weeks, index=2 if len(available_weeks) > 2 else 0)
             week_games = sched_df[sched_df["week"] == selected_week].copy()
 
             if not week_games.empty:
-                st.markdown("---")
-                h_cols = st.columns([1.2, 1.8, 1.5, 1.5, 1.2])
-                headers = [
-                    "Date",
-                    "Matchup",
-                    "Model Projected Spread",
-                    "Model Projected O/U",
-                    "Action",
-                ]
-                for col, h in zip(h_cols, headers):
-                    col.markdown(
-                        f"<span style='color: #9ca3af; font-weight: 700; font-size: 0.80rem;'>{h}</span>",
-                        unsafe_allow_html=True,
-                    )
-                st.markdown(
-                    "<hr style='margin: 4px 0px; border-color: #1f2937;'>",
-                    unsafe_allow_html=True,
-                )
-
-                matrix_table_rows = []
+                matrix_rows = []
                 for idx, row in week_games.iterrows():
                     home = str(row.get("home_team", "HOME"))
                     away = str(row.get("away_team", "AWAY"))
                     gameday = str(row.get("gameday", "TBD"))
 
-                    data_spread = calculate_data_driven_spread(df, away, home)
-                    model_spread = round(data_spread, 1)
-
-                    if model_spread < 0:
-                        model_spread_str = f"{home} {model_spread}"
-                    elif model_spread > 0:
-                        model_spread_str = f"{away} -{model_spread}"
+                    spread = calculate_data_driven_spread(df, away, home)
+                    home_win_p, away_win_p = get_game_win_probability(spread)
+                    
+                    if spread < 0:
+                        winner, win_p, spread_str = home, home_win_p, f"{home} {spread}"
+                    elif spread > 0:
+                        winner, win_p, spread_str = away, away_win_p, f"{away} -{spread}"
                     else:
-                        model_spread_str = f"{home} PK"
+                        winner, win_p, spread_str = "Pick 'Em", 0.500, f"{home} PK"
 
                     model_ou = calculate_data_driven_total(df, sched_df, away, home)
 
-                    matrix_table_rows.append({
+                    matrix_rows.append({
                         "Date": gameday,
                         "Matchup": f"{away} @ {home}",
-                        "Model Spread": model_spread_str,
-                        "Model O/U": model_ou,
+                        "Projected Spread": spread_str,
+                        "Predicted Winner": f"{winner} ({round(win_p * 100, 1)}%)",
+                        "Projected O/U": model_ou
                     })
 
-                    cols = st.columns([1.2, 1.8, 1.5, 1.5, 1.2])
+                matrix_df = pd.DataFrame(matrix_rows)
+                st.dataframe(matrix_df, use_container_width=True, hide_index=True)
 
-                    with cols[0]:
-                        st.markdown(
-                            f"<span style='color: #f3f4f6; font-size: 0.85rem;'>{gameday}</span>",
-                            unsafe_allow_html=True,
-                        )
-                    with cols[1]:
-                        st.markdown(
-                            f"<span style='color: #f3f4f6; font-size: 0.85rem; font-weight: 600;'>{away} @ {home}</span>",
-                            unsafe_allow_html=True,
-                        )
-                    with cols[2]:
-                        st.markdown(
-                            f"<span style='color: #10b981; font-size: 0.85rem; font-weight: 700;'>{model_spread_str}</span>",
-                            unsafe_allow_html=True,
-                        )
-                    with cols[3]:
-                        st.markdown(
-                            f"<span style='color: #10b981; font-size: 0.85rem; font-weight: 700;'>{model_ou}</span>",
-                            unsafe_allow_html=True,
-                        )
-
-                    with cols[4]:
-                        csv_bytes = generate_row_csv(
-                            bet_type="Spread & O/U Projection",
-                            selection=f"{away} @ {home} — Proj Spread: {model_spread_str} | Proj O/U: {model_ou}",
-                            odds=-110,
-                            units=1.0,
-                            model_prob=0.55,
-                        )
-                        st.download_button(
-                            label="📥 Log",
-                            data=csv_bytes,
-                            file_name=f"matrix_{away}_{home}.csv",
-                            mime="text/csv",
-                            key=f"dl_matrix_{selected_week}_{idx}",
-                        )
-
-                    st.markdown(
-                        "<hr style='margin: 4px 0px; border-color: #1f2937;'>",
-                        unsafe_allow_html=True,
-                    )
-
-                st.markdown("<br>", unsafe_allow_html=True)
-                matrix_df = pd.DataFrame(matrix_table_rows)
-                full_matrix_csv = matrix_df.to_csv(index=False).encode("utf-8")
+                full_csv = matrix_df.to_csv(index=False).encode("utf-8")
                 st.download_button(
-                    label=(
-                        "📥 Download Full Projections Table to CSV / Excel (Week"
-                        f" {selected_week})"
-                    ),
-                    data=full_matrix_csv,
+                    label=f"📥 Download Week {selected_week} Projections to CSV",
+                    data=full_csv,
                     file_name=f"nfl_projections_week_{selected_week}.csv",
                     mime="text/csv",
-                    key="dl_full_matrix_table",
-                    use_container_width=True,
+                    use_container_width=True
                 )
             else:
-                st.warning("No matchups scheduled for this week.")
+                st.warning("No games scheduled for this week.")
         else:
             st.warning("Schedule dataset unavailable.")
     except Exception as e:
